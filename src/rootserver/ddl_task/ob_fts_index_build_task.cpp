@@ -31,6 +31,11 @@
 #include "storage/fts/dict/ob_gen_dic_loader.h"
 #include "storage/fts/dict/ob_dic_loader.h"
 #include "storage/fts/dict/ob_dic_lock.h"
+#include "lib/cpu/ob_cpu_topology.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 using namespace oceanbase::share;
 
@@ -38,6 +43,74 @@ namespace oceanbase
 {
 namespace rootserver
 {
+namespace
+{
+// The number of workers that may run at the same time is limited by the cpu
+// quota of the container when there is one, the number of cores of the
+// machine is not.
+int64_t get_available_cpu_count()
+{
+  int64_t cpu_cnt = common::get_cpu_count();
+  int64_t quota = 0;
+  int64_t period = 0;
+  FILE *fp = fopen("/sys/fs/cgroup/cpu.max", "r");
+  if (nullptr != fp) {
+    char buf[128] = {0};
+    if (nullptr != fgets(buf, sizeof(buf), fp)) {
+      char *space = strchr(buf, ' ');
+      if (nullptr != space && 0 != strncmp(buf, "max", 3)) {
+        quota = strtoll(buf, nullptr, 10);
+        period = strtoll(space + 1, nullptr, 10);
+      }
+    }
+    fclose(fp);
+  } else {
+    fp = fopen("/sys/fs/cgroup/cpu/cpu.cfs_quota_us", "r");
+    if (nullptr != fp) {
+      char buf[64] = {0};
+      if (nullptr != fgets(buf, sizeof(buf), fp)) {
+        quota = strtoll(buf, nullptr, 10);
+      }
+      fclose(fp);
+      fp = fopen("/sys/fs/cgroup/cpu/cpu.cfs_period_us", "r");
+      if (nullptr != fp) {
+        char buf2[64] = {0};
+        if (nullptr != fgets(buf2, sizeof(buf2), fp)) {
+          period = strtoll(buf2, nullptr, 10);
+        }
+        fclose(fp);
+      }
+    }
+  }
+  if (quota > 0 && period > 0) {
+    int64_t limited = quota / period;
+    if (limited > 0 && limited < cpu_cnt) {
+      cpu_cnt = limited;
+    }
+  }
+  return cpu_cnt;
+}
+
+// The auxiliary tables of a fulltext index are filled by concurrent inserts,
+// one insert per table, and the parallelism of an insert decides how many
+// workers read the documents. The ddl framework defaults to a single worker
+// per insert, so building an index occupies a couple of cores even when the
+// machine has many more. The word tables are the expensive ones and they run
+// at the same time, so let each of them have half of the machine.
+int64_t get_build_parallelism(const int64_t parallelism)
+{
+  static const int64_t MAX_BUILD_PARALLELISM = 8;
+  int64_t target = get_available_cpu_count() / 2;
+  if (target > MAX_BUILD_PARALLELISM) {
+    target = MAX_BUILD_PARALLELISM;
+  }
+  if (target < 1) {
+    target = 1;
+  }
+  return MAX(parallelism, target);
+}
+} // anonymous namespace
+
 /***************         ObFtsIndexBuildTask        *************/
 
 ObFtsIndexBuildTask::ObFtsIndexBuildTask()
@@ -119,7 +192,9 @@ int ObFtsIndexBuildTask::init(
   } else if (OB_FAIL(deep_copy_index_arg(allocator_,
                                          create_index_arg,
                                          create_index_arg_))) {
-  } else if (OB_FAIL(ObFtsIndexBuilderUtil::decide_parallelism(create_index_arg.index_type_, parallelism, parallelism_))) {
+  } else if (OB_FAIL(ObFtsIndexBuilderUtil::decide_parallelism(create_index_arg.index_type_,
+                                                               get_build_parallelism(parallelism),
+                                                               parallelism_))) {
   } else {
     LOG_INFO("create_index_arg.index_type_x", K(create_index_arg.index_type_), K(create_index_arg.index_key_));
 
