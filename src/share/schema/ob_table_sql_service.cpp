@@ -15,7 +15,10 @@
  */
 
 #define USING_LOG_PREFIX SHARE_SCHEMA
+#include <string>
+#include <vector>
 #include "ob_table_sql_service.h"
+#include "ob_ai_column_spec.h"
 #include "lib/literals/ob_literals.h"
 #include "share/ob_global_stat_proxy.h"
 #include "share/schema/ob_constraint.h"
@@ -29,6 +32,13 @@ namespace share
 {
 namespace schema
 {
+namespace {
+
+int add_ai_column_metadata(common::ObISQLClient &sql_client,
+                           const ObTableSchema &table);
+
+} // namespace
+
 
 int ObTableSqlService::exec_update(
     ObISQLClient &sql_client,
@@ -899,6 +909,17 @@ int ObTableSqlService::insert_single_column(
       }
     }
   }
+  // An ALTER that adds an AI column also brings its helper columns.  The
+  // metadata row is written once the last helper column is in place.
+  if (OB_SUCC(ret)) {
+    const common::ObString col_name = new_column_schema.get_column_name();
+    const std::string col_name_str(col_name.ptr(), col_name.length());
+    const std::string spec_prefix(share::schema::ObAiColumnSpec::SPEC_PREFIX());
+    if (0 == col_name_str.compare(0, spec_prefix.size(), spec_prefix)
+        && OB_FAIL(add_ai_column_metadata(sql_client, new_table_schema))) {
+      LOG_WARN("write ai column metadata failed", K(ret));
+    }
+  }
   if (OB_SUCC(ret) && record_ddl_operation) {
     ObSchemaOperation opt;
     
@@ -1698,6 +1719,97 @@ int ObTableSqlService::add_table_dml(const ObTableSchema &table,
   return ret;
 }
 
+
+namespace {
+
+// Writes one __all_ai_column row per AI column of the freshly created table.
+//
+// The generation rule is read back from the comment of the `__ai_spec_<col>`
+// helper column of the table schema.  The comment is used on purpose: the
+// rewrite happens in the observer process while this writer runs in the root
+// server process, so the rule has to travel with the serialized schema.
+//
+// The call happens inside the create-table transaction, therefore metadata and
+// schema appear or disappear together.
+int add_ai_column_metadata(common::ObISQLClient &sql_client,
+                           const ObTableSchema &table)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString buffer;
+  {
+    const common::ObString tname = table.get_table_name();
+    for (ObTableSchema::const_column_iterator iter = table.column_begin();
+         OB_SUCC(ret) && iter != table.column_end(); ++iter) {
+      if (OB_ISNULL(iter) || OB_ISNULL(*iter)) {
+        continue;
+      }
+      const ObColumnSchemaV2 &spec_col = **iter;
+      const common::ObString spec_col_name = spec_col.get_column_name();
+      const std::string spec_col_str(spec_col_name.ptr(), spec_col_name.length());
+      const std::string spec_prefix(share::schema::ObAiColumnSpec::SPEC_PREFIX());
+      if (0 != spec_col_str.compare(0, spec_prefix.size(), spec_prefix)) {
+        continue;
+      }
+      const common::ObString comment = spec_col.get_comment();
+      share::schema::ObAiColumnSpec spec;
+      if (!share::schema::ObAiColumnSpec::decode(std::string(comment.ptr(), comment.length()),
+                                                  spec)) {
+        LOG_WARN("undecodable ai column spec", K(ret), K(spec_col_name));
+        continue;
+      }
+      const std::string column_name = spec_col_str.substr(spec_prefix.size());
+      const common::ObString cname(static_cast<int32_t>(column_name.size()),
+                                   column_name.c_str());
+      const ObColumnSchemaV2 *col = table.get_column_schema(cname);
+      if (OB_ISNULL(col)) {
+        LOG_WARN("ai column not found in table schema", K(ret), K(cname), K(tname));
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const std::string state_name =
+            share::schema::ObAiColumnSpec::state_column_name(column_name);
+        const std::string request_name =
+            share::schema::ObAiColumnSpec::request_column_name(column_name);
+        const ObColumnSchemaV2 *state_col = table.get_column_schema(
+            common::ObString(static_cast<int32_t>(state_name.size()), state_name.c_str()));
+        const ObColumnSchemaV2 *request_col = table.get_column_schema(
+            common::ObString(static_cast<int32_t>(request_name.size()), request_name.c_str()));
+        ObDMLSqlSplicer dml;
+        int64_t affected_rows = 0;
+        const common::ObString model(spec.model_name_.size(), spec.model_name_.c_str());
+        const common::ObString sync_mode(spec.sync_mode_.size(), spec.sync_mode_.c_str());
+        const common::ObString expr(spec.normalized_expr_.size(), spec.normalized_expr_.c_str());
+        const common::ObString dep(spec.dep_columns_.size(), spec.dep_columns_.c_str());
+        buffer.reuse();
+        if (OB_FAIL(dml.add_pk_column("table_id", table.get_table_id()))) {
+        } else if (OB_FAIL(dml.add_pk_column("column_id", col->get_column_id()))) {
+        } else if (OB_FAIL(dml.add_column("table_name", ObHexEscapeSqlStr(tname)))) {
+        } else if (OB_FAIL(dml.add_column("column_name", ObHexEscapeSqlStr(cname)))) {
+        } else if (OB_FAIL(dml.add_column("ai_func_type", spec.ai_func_type_))) {
+        } else if (OB_FAIL(dml.add_column("model_name", ObHexEscapeSqlStr(model)))) {
+        } else if (OB_FAIL(dml.add_column("sync_mode", ObHexEscapeSqlStr(sync_mode)))) {
+        } else if (OB_FAIL(dml.add_column("max_retries", spec.max_retries_))) {
+        } else if (OB_FAIL(dml.add_column("state_column_id",
+                       OB_ISNULL(state_col) ? 0 : static_cast<int64_t>(state_col->get_column_id())))) {
+        } else if (OB_FAIL(dml.add_column("request_column_id",
+                       OB_ISNULL(request_col) ? 0 : static_cast<int64_t>(request_col->get_column_id())))) {
+        } else if (OB_FAIL(dml.add_column("result_spec_column_id",
+                       static_cast<int64_t>(spec_col.get_column_id())))) {
+        } else if (OB_FAIL(dml.add_column("normalized_expr", ObHexEscapeSqlStr(expr)))) {
+        } else if (OB_FAIL(dml.add_column("dep_columns", ObHexEscapeSqlStr(dep)))) {
+        } else if (OB_FAIL(dml.splice_insert_sql(OB_ALL_AI_COLUMN_TNAME, buffer))) {
+        } else if (OB_FAIL(sql_client.write(buffer.ptr(), affected_rows))) {
+        } else if (affected_rows <= 0) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("write __all_ai_column failed", K(ret));
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+} // namespace
+
 int ObTableSqlService::batch_add_table_for_create_table(common::ObISQLClient &sql_client,
     const ObIArray<ObTableSchema> &tables)
 {
@@ -1721,6 +1833,7 @@ int ObTableSqlService::batch_add_table_for_create_table(common::ObISQLClient &sq
     } else if (OB_FAIL(dml.set_default_columns("is_deleted", "0"))) {
     } else if (OB_FAIL(exec_dml(sql_client, OB_ALL_TABLE_HISTORY_TNAME, dml, tables.count()))) {
     } else if (FALSE_IT(time_guard.click("insert_all_table_history"))) {
+    } else if (OB_FAIL(add_ai_column_metadata(sql_client, tables.at(0)))) {
     }
   }
   return ret;

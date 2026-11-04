@@ -27,6 +27,7 @@
 #include "sql/engine/expr/ob_expr_regexp_context.h"  // ObExprRegexpSessionVariables (unity regroup)
 #include "sql/engine/cmd/ob_index_executor.h"
 #include "sql/engine/cmd/ob_ddl_executor_util.h"
+#include "sql/engine/cmd/ob_ai_column_validator.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_alter_table_stmt.h"
 #include "sql/resolver/ddl/ob_drop_table_stmt.h"
@@ -470,6 +471,9 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
       ret = OB_NOT_INIT;
     } else if (OB_FAIL(ObPartitionExecutorUtils::calc_values_exprs(ctx, stmt))) {
     } else if (OB_FAIL(set_index_arg_list(ctx, stmt))) {
+    } else if (OB_FAIL(ObAiColumnValidator::validate(table_schema))) {
+      // The AI column declarations are invalid, the statement must fail here
+      // so that the error message reaches the client.
     } else if (OB_ISNULL(select_stmt)) { // Processing for normal table creation
       bool &is_parallel_create = create_table_arg.is_parallel_;
       if (OB_FAIL(ctx.get_sql_ctx()->schema_guard_->reset())){
@@ -789,7 +793,10 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       } else if (OB_FAIL(check_alter_partition(ctx, stmt, alter_table_arg))) {
       } else if (OB_FAIL(check_alter_part_key(ctx, alter_table_arg))) {
       } else if (OB_FAIL(set_index_arg_list(ctx, stmt))) {
-      } else if (OB_INVALID_ID == alter_table_arg.session_id_
+      } else if (OB_FAIL(ObAiColumnValidator::validate(alter_table_arg.alter_table_schema_))) {
+      // The AI column declarations are invalid, the statement must fail here
+      // so that the error message reaches the client.
+    } else if (OB_INVALID_ID == alter_table_arg.session_id_
                 && 0 != my_session->get_sessid_for_table()
                 && FALSE_IT(alter_table_arg.session_id_ = my_session->get_sessid_for_table())) {
         //impossible

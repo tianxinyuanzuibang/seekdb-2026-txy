@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_PARSER
 #include "ob_parser.h"
 #include "ob_file_sql_rewriter.h"
+#include "ob_ai_column_rewriter.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/oblog/ob_log.h"
 #include "parse_malloc.h"
@@ -854,7 +855,18 @@ int ObParser::parse_sql(const ObString &stmt,
     ret = OB_SUCCESS;
     did_rewrite = false;
   }
-  ObString parse_input = did_rewrite ? rewritten : stmt;
+  ObString ai_rewritten;
+  bool ai_did_rewrite = false;
+  if (OB_SUCC(ret) && !did_rewrite) {
+    if (OB_FAIL(ObAiColumnRewriter::maybe_rewrite(
+            *static_cast<ObIAllocator *>(parse_result.malloc_pool_),
+            stmt, ai_rewritten, ai_did_rewrite))) {
+      // The declaration is invalid, the statement must fail with the
+      // reported error instead of being parsed as an ordinary one.
+      LOG_WARN("rewrite ai column declaration failed", K(ret));
+    }
+  }
+  ObString parse_input = did_rewrite ? rewritten : (ai_did_rewrite ? ai_rewritten : stmt);
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(sql_parser.parse(parse_input.ptr(), parse_input.length(), parse_result))) {
     // if is multi_values_parser opt not need retry

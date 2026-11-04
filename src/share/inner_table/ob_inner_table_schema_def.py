@@ -2467,6 +2467,58 @@ all_objauth_mysql_def = dict(
 def_table_schema(**all_objauth_mysql_def)
 def_table_schema(**gen_history_table_def(1134, all_objauth_mysql_def))
 
+all_ai_column_def = dict(
+    owner = 'seekdb',
+    table_name = '__all_ai_column',
+    table_id = '1135',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('table_name', 'varchar:OB_MAX_TABLE_NAME_LENGTH'),
+        ('column_name', 'varchar:OB_MAX_COLUMN_NAME_LENGTH'),
+        ('ai_func_type', 'int', 'false', 0),
+        ('model_name', 'varchar:128'),
+        ('sync_mode', 'varchar:16'),
+        ('max_retries', 'int', 'false', 0),
+        ('state_column_id', 'int', 'false', 0),
+        ('request_column_id', 'int', 'false', 0),
+        ('result_spec_column_id', 'int', 'false', 0),
+        ('normalized_expr', 'varchar:4096'),
+        ('dep_columns', 'varchar:1024')
+    ]
+)
+def_table_schema(**all_ai_column_def)
+
+all_ai_column_task_def = dict(
+    owner = 'seekdb',
+    table_name = '__all_ai_column_task',
+    table_id = '1136',
+    table_type = 'SYSTEM_TABLE',
+    gm_columns = ['gmt_create', 'gmt_modified'],
+    rowkey_columns = [
+        ('table_id', 'int'),
+        ('column_id', 'int'),
+        ('rowkey_hash', 'int')
+    ],
+    is_cluster_private = False,
+    meta_record_in_sys = False,
+    normal_columns = [
+        ('request_id', 'varchar:64'),
+        ('rowkey_predicate', 'varchar:1024'),
+        ('state', 'int', 'false', 0),
+        ('retry_count', 'int', 'false', 0),
+        ('eligible_ts', 'varchar:64'),
+        ('last_error', 'varchar:512')
+    ]
+)
+def_table_schema(**all_ai_column_task_def)
+
 
 # Reserved position (placeholder before this line)
 # Placeholder suggestion for this section: Use actual table names for placeholders

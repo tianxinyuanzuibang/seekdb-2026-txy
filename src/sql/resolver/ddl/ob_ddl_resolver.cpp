@@ -1789,7 +1789,15 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
     column_definition_ref_node = node->children_[0];
     ParseNode *table_node = column_definition_ref_node->children_[1];
     if (OB_SUCC(resolve_column_definition_ref(column, column_definition_ref_node, false))) {
-      //empty
+      // AI column helper columns are created by the rewrite stage and must stay
+      // invisible to users, information_schema and select *.
+      const ObString helper_name = column.get_column_name_str();
+      if (helper_name.length() > 10
+          && (0 == strncmp(helper_name.ptr(), "__ai_state_", 11)
+              || 0 == strncmp(helper_name.ptr(), "__ai_req_", 9)
+              || 0 == strncmp(helper_name.ptr(), "__ai_spec_", 10))) {
+        column.set_is_hidden(true);
+      }
     } else {
       SQL_RESV_LOG(WARN, "fail to resolve column_definition_ref", K(ret));
     }
