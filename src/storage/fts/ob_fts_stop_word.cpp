@@ -29,26 +29,6 @@ namespace storage
 
 namespace
 {
-// All built-in stop words are pure ASCII, so membership of an ASCII word can be
-// decided directly against the compile-time list without a charset conversion,
-// a temporary allocator, or the locked global hash set.
-OB_INLINE bool ascii_case_equal(const char *lhs, const char *rhs, const int64_t len)
-{
-  bool is_equal = true;
-  for (int64_t i = 0; is_equal && i < len; ++i) {
-    char l = lhs[i];
-    char r = rhs[i];
-    if (l >= 'A' && l <= 'Z') {
-      l = static_cast<char>(l - 'A' + 'a');
-    }
-    if (r >= 'A' && r <= 'Z') {
-      r = static_cast<char>(r - 'A' + 'a');
-    }
-    is_equal = (l == r);
-  }
-  return is_equal;
-}
-
 OB_INLINE bool is_ascii_word(const ObString &word)
 {
   bool is_ascii = true;
@@ -56,18 +36,6 @@ OB_INLINE bool is_ascii_word(const ObString &word)
     is_ascii = (0 == (static_cast<unsigned char>(word.ptr()[i]) & 0x80));
   }
   return is_ascii;
-}
-
-OB_INLINE bool is_builtin_stop_word(const ObString &word)
-{
-  bool is_stop = false;
-  const int64_t stopword_count = sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]);
-  for (int64_t i = 0; !is_stop && i < stopword_count; ++i) {
-    const int64_t stopword_len = static_cast<int64_t>(strlen(ob_stop_word_list[i]));
-    is_stop = (stopword_len == word.length()
-               && ascii_case_equal(ob_stop_word_list[i], word.ptr(), stopword_len));
-  }
-  return is_stop;
 }
 
 // Decide whether casedown can change the token. CJK Unified Ideographs and
@@ -153,9 +121,39 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (is_ascii_word(word.get_word().get_string())) {
-    // ASCII fast path: general_ci comparison over ASCII is case-insensitive byte
-    // comparison and every built-in stop word is pure ASCII.
-    is_stopword = is_builtin_stop_word(word.get_word().get_string());
+    // Every built-in stop word is a lower case ASCII word, and a word of
+    // FTS_STOP_WORD_MAX_LENGTH bytes or more can not be one of them.  Lower case
+    // the token in place and ask the hash set once instead of walking the whole
+    // compile time list for every token.
+    const ObString ascii_word = word.get_word().get_string();
+    if (ascii_word.length() >= FTS_STOP_WORD_MAX_LENGTH) {
+      is_stopword = false;
+    } else {
+      char lower_buf[FTS_STOP_WORD_MAX_LENGTH];
+      bool has_upper = false;
+      for (int64_t i = 0; !has_upper && i < ascii_word.length(); ++i) {
+        has_upper = (ascii_word.ptr()[i] >= 'A' && ascii_word.ptr()[i] <= 'Z');
+      }
+      const char *lookup_ptr = ascii_word.ptr();
+      if (has_upper) {
+        for (int64_t i = 0; i < ascii_word.length(); ++i) {
+          const char c = ascii_word.ptr()[i];
+          lower_buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+        }
+        lookup_ptr = lower_buf;
+      }
+      ObFTWord lookup_word(ascii_word.length(), lookup_ptr, stopword_type_);
+      ret = stopword_set_.exist_refactored(lookup_word);
+      if (OB_HASH_NOT_EXIST == ret) {
+        is_stopword = false;
+        ret = OB_SUCCESS;
+      } else if (OB_HASH_EXIST == ret) {
+        is_stopword = true;
+        ret = OB_SUCCESS;
+      } else if (OB_SUCC(ret)) {
+        ret = OB_ERR_UNEXPECTED;
+      }
+    }
   } else {
     common::ObString cmp_str;
     // Skip the conversion copy when the charsets already match (the common case:
