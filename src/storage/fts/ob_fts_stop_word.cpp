@@ -29,26 +29,6 @@ namespace storage
 
 namespace
 {
-// All built-in stop words are pure ASCII, so membership of an ASCII word can be
-// decided directly against the compile-time list without a charset conversion,
-// a temporary allocator, or the locked global hash set.
-OB_INLINE bool ascii_case_equal(const char *lhs, const char *rhs, const int64_t len)
-{
-  bool is_equal = true;
-  for (int64_t i = 0; is_equal && i < len; ++i) {
-    char l = lhs[i];
-    char r = rhs[i];
-    if (l >= 'A' && l <= 'Z') {
-      l = static_cast<char>(l - 'A' + 'a');
-    }
-    if (r >= 'A' && r <= 'Z') {
-      r = static_cast<char>(r - 'A' + 'a');
-    }
-    is_equal = (l == r);
-  }
-  return is_equal;
-}
-
 OB_INLINE bool is_ascii_word(const ObString &word)
 {
   bool is_ascii = true;
@@ -58,16 +38,77 @@ OB_INLINE bool is_ascii_word(const ObString &word)
   return is_ascii;
 }
 
-OB_INLINE bool is_builtin_stop_word(const ObString &word)
+// The built in stop word table is a compile time constant: a few dozen lower case
+// ASCII words.  Deciding whether a token is one of them is on the hot path of
+// every single document, and an index build runs it from several worker threads
+// at once, so the check must not touch any shared writable state.  The table is
+// therefore folded once into a read only list of (length, leading bytes) pairs
+// and membership is decided by comparing two integers per entry: no lock, no
+// allocation, no charset work, and nothing that several threads can contend on.
+class ObStopWordLut
 {
-  bool is_stop = false;
-  const int64_t stopword_count = sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]);
-  for (int64_t i = 0; !is_stop && i < stopword_count; ++i) {
-    const int64_t stopword_len = static_cast<int64_t>(strlen(ob_stop_word_list[i]));
-    is_stop = (stopword_len == word.length()
-               && ascii_case_equal(ob_stop_word_list[i], word.ptr(), stopword_len));
+public:
+  static const int64_t MAX_WORD_LEN = 8;
+  static const int64_t MAX_WORD_CNT = 64;
+
+  ObStopWordLut() : count_(0)
+  {
+    const int64_t table_cnt = static_cast<int64_t>(
+        sizeof(ob_stop_word_list) / sizeof(ob_stop_word_list[0]));
+    for (int64_t i = 0; i < table_cnt && count_ < MAX_WORD_CNT; ++i) {
+      const char *word = ob_stop_word_list[i];
+      int64_t len = 0;
+      while (len < MAX_WORD_LEN && '\0' != word[len]) {
+        ++len;
+      }
+      if (len > 0) {
+        entries_[count_].prefix_ = pack_prefix(word, len);
+        entries_[count_].len_ = static_cast<uint8_t>(len);
+        ++count_;
+      }
+    }
   }
-  return is_stop;
+
+  bool contains(const char *word, const int64_t len) const
+  {
+    bool found = false;
+    if (len > 0 && len <= MAX_WORD_LEN) {
+      const uint64_t prefix = pack_prefix(word, len);
+      for (int64_t i = 0; !found && i < count_; ++i) {
+        found = (entries_[i].len_ == static_cast<uint8_t>(len)
+                 && entries_[i].prefix_ == prefix);
+      }
+    }
+    return found;
+  }
+
+private:
+  struct Entry
+  {
+    uint64_t prefix_;
+    uint8_t len_;
+  };
+
+  static uint64_t pack_prefix(const char *word, const int64_t len)
+  {
+    uint64_t prefix = 0;
+    for (int64_t i = len - 1; i >= 0; --i) {
+      prefix = (prefix << 8) | static_cast<uint8_t>(word[i]);
+    }
+    return prefix;
+  }
+
+private:
+  Entry entries_[MAX_WORD_CNT];
+  int64_t count_;
+};
+
+const ObStopWordLut &get_stop_word_lut()
+{
+  // Built once, then only read; the guard of a function local static is a plain
+  // load after the first call, so no thread can make another one wait.
+  static const ObStopWordLut stop_word_lut;
+  return stop_word_lut;
 }
 
 // Decide whether casedown can change the token. CJK Unified Ideographs and
@@ -153,9 +194,27 @@ int ObStopWordChecker::check_stopword(const ObFTWord &word, bool &is_stopword)
   } else if (OB_UNLIKELY(word.empty())) {
     ret = OB_INVALID_ARGUMENT;
   } else if (is_ascii_word(word.get_word().get_string())) {
-    // ASCII fast path: general_ci comparison over ASCII is case-insensitive byte
-    // comparison and every built-in stop word is pure ASCII.
-    is_stopword = is_builtin_stop_word(word.get_word().get_string());
+    // general_ci comparison over ASCII is case insensitive byte comparison, so a
+    // lower cased copy of the token is what the table has to be asked about.
+    const ObString ascii_word = word.get_word().get_string();
+    if (ascii_word.length() > ObStopWordLut::MAX_WORD_LEN) {
+      is_stopword = false;
+    } else {
+      char lower_buf[ObStopWordLut::MAX_WORD_LEN];
+      bool has_upper = false;
+      for (int64_t i = 0; !has_upper && i < ascii_word.length(); ++i) {
+        has_upper = (ascii_word.ptr()[i] >= 'A' && ascii_word.ptr()[i] <= 'Z');
+      }
+      const char *lookup_ptr = ascii_word.ptr();
+      if (has_upper) {
+        for (int64_t i = 0; i < ascii_word.length(); ++i) {
+          const char c = ascii_word.ptr()[i];
+          lower_buf[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+        }
+        lookup_ptr = lower_buf;
+      }
+      is_stopword = get_stop_word_lut().contains(lookup_ptr, ascii_word.length());
+    }
   } else {
     common::ObString cmp_str;
     // Skip the conversion copy when the charsets already match (the common case:
