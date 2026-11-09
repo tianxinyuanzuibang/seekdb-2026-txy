@@ -49,16 +49,40 @@ def to_float32(value):
     return packed
 
 
+_FLOAT32_MAX = 3.4028235677973366e38
+
+
 def to_float32_values(values):
     """Convert a sequence of numbers to float32 in one pass.
 
     Bulk conversion matters: the benchmark inserts 10,000 rows of
-    128-dimensional vectors, and converting element by element costs two
-    ``struct`` calls per number.  Packing the whole vector at once is
-    roughly an order of magnitude faster.
+    128-dimensional vectors, and converting element by element costs
+    several Python-level operations per number.  This version packs the
+    whole vector in one `struct` call and detects NaN/Infinity with a
+    single `sum` + `isfinite` check instead of inspecting every element.
+
+    Raises ``SQLError`` when any element is NaN, Infinity, or not
+    representable as a finite float32.
     """
-    if not values:
+    count = len(values)
+    if not count:
         return ()
+    try:
+        packed = struct.pack("<{}f".format(count), *values)
+    except (struct.error, TypeError, OverflowError):
+        # Non-numeric element, or a value outside the float32 range.
+        return _to_float32_values_checked(values)
+    result = struct.unpack("<{}f".format(count), packed)
+    # A finite input always yields a finite sum (the float32 range is far
+    # below the float64 range), so a non-finite sum means the input held a
+    # NaN or an Infinity.
+    if not math.isfinite(sum(result)):
+        return _to_float32_values_checked(values)
+    return result
+
+
+def _to_float32_values_checked(values):
+    """Element-by-element conversion that reports a precise error."""
     numbers = []
     for element in values:
         if isinstance(element, bool):
@@ -68,10 +92,19 @@ def to_float32_values(values):
                 "vector elements must be numeric, got {!r}".format(element)
             )
         numbers.append(float(element))
-    packed = struct.pack("<{}f".format(len(numbers)), *numbers)
-    result = struct.unpack("<{}f".format(len(numbers)), packed)
-    # struct.pack raises OverflowError for values outside the float32 range
-    # and packs NaN/Infinity happily, so both are checked explicitly.
+    for original in numbers:
+        if math.isnan(original):
+            raise invalid_value("NaN is not a valid vector element")
+        if math.isinf(original):
+            raise invalid_value("Infinity is not a valid vector element")
+        if original > _FLOAT32_MAX or original < -_FLOAT32_MAX:
+            raise invalid_value(
+                "value {} overflows float32 range".format(original)
+            )
+    result = struct.unpack(
+        "<{}f".format(len(numbers)),
+        struct.pack("<{}f".format(len(numbers)), *numbers),
+    )
     for original, converted in zip(numbers, result):
         if math.isnan(converted) or math.isinf(converted):
             raise invalid_value(

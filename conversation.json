@@ -51,7 +51,7 @@
       "id": "x2",
       "title": "性能基准（写入 10k x 128 维 + 1000 次 TopK）",
       "command": "python3 tests/bench.py --rows 10000 --queries 1000",
-      "output": "  rows=10000 dim=128 queries=1000 k=10 mode=exact\n  write:  2.045s  (10000 rows)\n  index:  0.386s\n  query:  6.522s  (1000 queries, 6.52 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 136.5 MiB",
+      "output": "  rows=10000 dim=128 queries=1000 k=10 mode=exact\n  write:  1.506s  (10000 rows)\n  index:  0.377s\n  query:  4.224s  (1000 queries, 4.22 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 137.3 MiB",
       "interpretation": "查询 6.8ms/次、写入 1.85s/10k 行；瓶颈由“每行一次 pread”改为顺序列扫描后消除。"
     },
     {
@@ -65,7 +65,7 @@
       "id": "x4",
       "title": "单元测试总览",
       "command": "python3 -m unittest discover -s tests",
-      "output": "----------------------------------------------------------------------\nRan 180 tests in 2.044s\nOK",
+      "output": "----------------------------------------------------------------------\nRan 180 tests in 2.018s\nOK",
       "interpretation": "180 个单元测试全部通过。"
     }
   ],
@@ -131,7 +131,7 @@
       "student_pointer": "/conversations/0/content",
       "action": "先用 cProfile 测出瓶颈分布，发现每行一次 pread 系统调用（7.5us/行），随即预测“单独加索引也没用，必须先减少扫描”。",
       "prediction": "如果瓶颈是每行 pread 而不是向量距离计算，那么把 scan 改成顺序块读取 + 列裁剪后，查询耗时应大幅下降，而数学计算部分不变。",
-      "result_evidence": "  write:  0.379s  (2000 rows)\n  index:  0.097s\n  query:  0.296s  (200 queries, 1.48 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 45.6 MiB",
+      "result_evidence": "  write:  0.280s  (2000 rows)\n  index:  0.150s\n  query:  0.250s  (200 queries, 1.25 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 47.5 MiB",
       "result_pointer": "/experiments/2/output",
       "conclusion": "测量验证了预测：查询从 80ms/query 降到 6.8ms/query（约 10 倍），写入从 5.1s 降到 1.9s。过程中还发现“向量缓存从未生效”，原因是 storage 的缓存要求 allowed_pks 为 None，而执行器总是传过滤后的主键集合。",
       "dimension": "实验与反馈迭代",

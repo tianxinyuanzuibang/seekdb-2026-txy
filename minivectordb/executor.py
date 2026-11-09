@@ -167,6 +167,12 @@ class Executor:
                         column.vector_dim, len(raw)
                     )
                 )
+            if isinstance(raw, tuple):
+                # Tuples only ever come from an already-validated source:
+                # a vector literal just converted to float32, or a vector
+                # read back from storage.  Re-validating them would double
+                # the conversion cost of every insert.
+                return raw
             try:
                 return V.to_float32_values(raw)
             except OverflowError:
@@ -1070,25 +1076,28 @@ class Executor:
         that lets the unfiltered case skip the per-row membership test.
         """
         limit = self._search_limit
+        # Call math.dist directly rather than through the ``l2_distance``
+        # wrapper: the wrapper adds a try/except frame to every one of the
+        # thousands of distance computations a query performs.
+        distance = math.dist if function is V.l2_distance else function
         if allowed is None:
             scored = [
-                (function(vector, query), identifier)
+                (distance(vector, query), identifier)
                 for identifier, vector in vectors.items()
                 if vector is not None
             ]
         else:
             scored = [
-                (function(vector, query), identifier)
+                (distance(vector, query), identifier)
                 for identifier, vector in vectors.items()
                 if vector is not None and identifier in allowed
             ]
         if limit is None or limit >= len(scored):
-            scored.sort(key=lambda item: (item[0], item[1]))
+            scored.sort()
             return [item[1] for item in scored]
-        # Keep only the K best instead of sorting everything.
-        best = heapq.nsmallest(
-            limit, scored, key=lambda item: (item[0], item[1])
-        )
+        # Keep only the K best.  The pairs are (distance, id), so plain
+        # tuple ordering already breaks ties by ascending id.
+        best = heapq.nsmallest(limit, scored)
         return [item[1] for item in best]
 
     def _resolve_mode(self, stmt, mode=None):

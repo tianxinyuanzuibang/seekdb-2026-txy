@@ -21,7 +21,7 @@ import urllib.request
 TOKEN = os.environ.get("MVD_GITHUB_TOKEN", "")
 if not TOKEN:
     sys.exit("set MVD_GITHUB_TOKEN to a GitHub token with repo scope")
-REPO = "tianxinyuanzuibang/seekdb-2026-txy"
+REPO = os.environ.get("MVD_GITHUB_REPO", "tianxinyuanzuibang/seekdb-2026-txy")
 ROOT = os.path.dirname(os.path.abspath(__file__))
 API = "https://api.github.com/repos/" + REPO
 

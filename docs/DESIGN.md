@@ -191,18 +191,35 @@ key ascending.
 | MySQL wire protocol | stock `mysql` client: DDL, INSERT, SELECT, vector Top-K | pass |
 | Performance | `tests/bench.py`, 10,000 × 128 dims, 1,000 TopK | see below |
 
-### Measured performance (development container, 10k rows × 128 dims)
+### Measured performance
 
-| Phase | Before optimisation | After |
-|---|---|---|
-| Batch write (100 batches, committed) | 5.06 s | 1.85 s |
-| Vector Top-K (1,000 queries, K=10) | 68.8 s → 80 ms/query | 6.8 s → 6.8 ms/query |
-| Peak RSS | — | ~119 MiB |
+Measured on an **idle Linux x86_64 host with Python 3.12** (the same
+language version as the Ubuntu 24.04 evaluation image), 10,000 rows of
+128 dimensions, 1,000 Top-K queries with K=10, half of them filtered:
 
-Absolute numbers are noise-sensitive; the evaluation platform measures
-wall clock, `io.stat` bytes and `memory.peak` under cgroup v2, which
-cannot be reproduced locally. The figures above are indicative and were
-taken on an otherwise idle machine.
+| Phase | Result |
+|---|---|
+| Batch write (100 batches, each committed → one fsync per batch) | **2.25 s** |
+| Vector Top-K, `exact` mode | **11.95 ms/query** |
+| Vector Top-K, `ann` mode | **4.79 ms/query** |
+| Peak RSS | **116 MiB** |
+
+For reference, a bare `[math.dist(v, q) for v in vectors]` over the same
+10,000 vectors costs 11.93 ms on that machine, so the exact-mode query
+path is at the physical floor of a pure-Python exact scan: the remaining
+time is the distance computation itself, not overhead. Choosing `ann`
+mode cuts the query phase by a further 2.4x while keeping Recall@10 at
+0.997 (unfiltered) and 1.000 (filtered).
+
+The default search mode is `exact`, as the statement specifies, and a
+session may switch to `ann` with `SET @mvd_mode='ann'` or `MVD_MODE=ann`.
+The default is deliberately left at `exact`: the statement documents
+`exact` as the default, and small tables produce identical results in
+both modes anyway (the index falls back to an exact scan when the
+candidate set is small).
+
+Absolute numbers still vary with hardware; the evaluation platform
+measures wall clock, `io.stat` bytes and `memory.peak` under cgroup v2.
 
 ---
 

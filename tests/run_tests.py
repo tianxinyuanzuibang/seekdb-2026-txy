@@ -44,7 +44,7 @@ def normalize(content):
 
 def read_statements(path):
     """Split a .test file into statements."""
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8", errors="replace") as handle:
         text = handle.read()
     statements = []
     buf = ""
@@ -99,6 +99,10 @@ def discover():
     for root, _dirs, files in os.walk(HERE):
         for name in files:
             if not name.endswith(".test"):
+                continue
+            # Skip macOS AppleDouble metadata files ("._name.test"), which
+            # are not real test cases and are not valid UTF-8.
+            if name.startswith("._") or name.startswith("."):
                 continue
             test_path = os.path.join(root, name)
             result_path = test_path[: -len(".test")] + ".result"
