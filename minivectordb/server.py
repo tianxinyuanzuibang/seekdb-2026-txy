@@ -43,6 +43,10 @@ PROFILES = {
     # one JSON object per statement
     "json": {"MVD_PROTOCOL": "line", "MVD_OUTPUT": "json",
              "MVD_ECHO": "0", "MVD_TERMINATOR": "0"},
+    # the whole stdout is one JSON array of per-statement assertion objects,
+    # the same shape as the published .result files
+    "jsonarray": {"MVD_PROTOCOL": "line", "MVD_OUTPUT": "jsonarray",
+                  "MVD_ECHO": "0", "MVD_TERMINATOR": "0"},
     # MySQL client/server protocol over the stdin/stdout pipes
     "mysql": {"MVD_PROTOCOL": "mysql", "MVD_OUTPUT": "text",
               "MVD_ECHO": "0", "MVD_TERMINATOR": "0"},

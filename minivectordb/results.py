@@ -128,3 +128,53 @@ def _json_value(value):
     if isinstance(value, tuple):
         return list(value)
     return value
+
+# The published assertions name errors semantically, for example
+# ``duplicate_key`` or ``unsupported_sql``; the numeric-to-name mapping is not
+# frozen, so a name is emitted where one is well known and a generic
+# ``error`` otherwise.
+ERROR_NAMES = {
+    1062: "duplicate_key",
+    1064: "unsupported_sql",
+    1235: "unsupported_sql",
+    1146: "no_such_table",
+    1051: "no_such_table",
+    1054: "unknown_column",
+    1406: "value_too_long",
+    1292: "invalid_value",
+    1367: "invalid_value",
+    1068: "invalid_table_definition",
+    1050: "table_exists",
+    1136: "column_count_mismatch",
+    1048: "null_value",
+}
+
+
+def error_name(code):
+    """The semantic name of an error code."""
+    return ERROR_NAMES.get(code, "error")
+
+
+def render_assertion(result):
+    """Render a result as the assertion object the case pack uses.
+
+    Only the fields the published assertions carry are emitted, so an
+    element compares equal to ``{}`` for a statement that merely has to
+    succeed, and carries exactly ``columns``/``rows`` or ``affected_rows``
+    otherwise.
+    """
+    import json
+
+    if result.is_error:
+        return json.dumps(
+            {"error": error_name(result.error_code)}, ensure_ascii=False
+        )
+    payload = {}
+    if result.columns:
+        payload["columns"] = list(result.columns)
+        payload["rows"] = [
+            [_json_value(v) for v in row] for row in result.rows
+        ]
+    elif result.affected_rows is not None:
+        payload["affected_rows"] = result.affected_rows
+    return json.dumps(payload, ensure_ascii=False)

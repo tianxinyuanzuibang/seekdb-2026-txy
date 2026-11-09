@@ -240,6 +240,134 @@ def case_paths(name):
     )
 
 
+def run_case_json_array(name, verbose=False):
+    """Run a case in one process and compare the whole JSON array.
+
+    The case pack's expectations are a JSON array of assertion objects, so
+    the natural way for the driver to work is to feed the statements, let
+    the database answer, and compare the array.  This checks that path
+    end to end.
+    """
+    test_path, result_path = case_paths(name)
+    if not os.path.isfile(test_path) or not os.path.isfile(result_path):
+        print("[  MISSING ] {}".format(name))
+        return False
+
+    items = parse_lines(test_path)
+    with open(result_path, "r", encoding="utf-8") as handle:
+        expectations = json.load(handle)
+
+    data_dir = tempfile.mkdtemp(prefix="mvd-official-")
+    env = dict(os.environ)
+    env.update({
+        "MVD_DATA_DIR": data_dir,
+        "MVD_PROTOCOL": "line",
+        "MVD_ECHO": "0",
+        "MVD_TERMINATOR": "0",
+        "MVD_OUTPUT": "jsonarray",
+    })
+    # A restart needs a second process, so the statements around it are
+    # split into segments that each run in their own process.
+    segments = [[]]
+    for kind, payload in items:
+        if kind == "directive" and payload == "--restart":
+            segments.append([])
+            continue
+        segments[-1].append(payload)
+
+    produced = []
+    for segment in segments:
+        script = "".join(statement + "\n" for statement in segment)
+        proc = subprocess.run(
+            [sys.executable, "-u", "-m", "minivectordb"],
+            input=script.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            cwd=ROOT,
+            env=env,
+            timeout=180,
+        )
+        text = proc.stdout.decode("utf-8", "replace").strip()
+        if not text:
+            continue
+        try:
+            produced.extend(json.loads(text))
+        except ValueError:
+            failures = ["segment produced unparsable output: {!r}".format(
+                text[:200])]
+            produced = None
+            break
+    shutil.rmtree(data_dir, ignore_errors=True)
+
+    if produced is None:
+        print("[  FAILED  ] {}".format(name))
+        if verbose:
+            for failure in failures:
+                print("      " + failure)
+        return False
+
+    problems = []
+    if len(produced) != len(expectations):
+        problems.append(
+            "produced {} assertions, expected {}".format(
+                len(produced), len(expectations)
+            )
+        )
+    for index, (actual, expected) in enumerate(
+        zip(produced, expectations)
+    ):
+        if not isinstance(expected, dict):
+            continue
+        if "error" in expected:
+            if "error" not in actual:
+                problems.append(
+                    "assertion {}: expected error {!r}, got {}".format(
+                        index + 1, expected["error"], actual
+                    )
+                )
+            continue
+        if "error" in actual:
+            problems.append(
+                "assertion {}: unexpected error {}".format(index + 1, actual)
+            )
+            continue
+        if "affected_rows" in expected:
+            if actual.get("affected_rows") != expected["affected_rows"]:
+                problems.append(
+                    "assertion {}: affected_rows {} != expected {}".format(
+                        index + 1, actual.get("affected_rows"),
+                        expected["affected_rows"]
+                    )
+                )
+        if "columns" in expected:
+            if list(actual.get("columns") or []) != list(expected["columns"]):
+                problems.append(
+                    "assertion {}: columns {} != expected {}".format(
+                        index + 1, actual.get("columns"),
+                        expected["columns"],
+                    )
+                )
+        if "rows" in expected:
+            if not rows_equal(
+                expected["rows"], actual.get("rows") or [],
+                bool(expected.get("unordered")),
+            ):
+                problems.append(
+                    "assertion {}: rows {} != expected {}".format(
+                        index + 1, actual.get("rows"), expected["rows"]
+                    )
+                )
+
+    if problems:
+        print("[  FAILED  ] {}".format(name))
+        if verbose:
+            for problem in problems:
+                print("      " + problem)
+        return False
+    print("[       OK ] {} (json array)".format(name))
+    return True
+
+
 def run_case(name, verbose=False):
     test_path, result_path = case_paths(name)
     if not os.path.isfile(test_path) or not os.path.isfile(result_path):
@@ -367,6 +495,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("pattern", nargs="?", default=None)
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--array", action="store_true",
+        help="run each case as one JSON array of assertions",
+    )
     args = parser.parse_args()
 
     cases = discover()
@@ -376,7 +508,8 @@ def main():
         print("no official cases found in {}".format(OFFICIAL_DIR))
         return 1
 
-    results = [run_case(name, args.verbose) for name in cases]
+    runner = run_case_json_array if args.array else run_case
+    results = [runner(name, args.verbose) for name in cases]
     print("\n{} official case(s), {} failure(s)".format(
         len(results), results.count(False)))
     return 0 if all(results) else 1

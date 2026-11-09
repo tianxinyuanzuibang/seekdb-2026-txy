@@ -41,7 +41,7 @@ import re
 import struct
 import sys
 
-from .results import Result, render_json, render_text
+from .results import Result, render_assertion, render_json, render_text
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -643,6 +643,19 @@ class LineProtocol:
             os.environ.get("MVD_TERMINATOR", "1").strip().lower()
             not in ("0", "false", "no", "off", "")
         )
+        # The published expectations are a JSON array of per-statement
+        # assertion objects.  If the driver feeds all SQL and then reads the
+        # whole stdout, the natural answer is exactly such an array, so this
+        # mode emits one.
+        self.array_output = (
+            os.environ.get("MVD_OUTPUT", "").strip().lower() == "jsonarray"
+        )
+        self._array_first = True
+
+    def _close_array(self):
+        if self.array_output:
+            self.out_stream.write(b"\n]\n" if not self._array_first else b"[]\n")
+            self.out_stream.flush()
 
     def serve(self):
         while True:
@@ -687,6 +700,7 @@ class LineProtocol:
                 if text_only.strip():
                     self._run(text_only.strip())
         self.pending = ""
+        self._close_array()
 
     def _run(self, sql):
         if not sql:
@@ -718,6 +732,18 @@ class LineProtocol:
             import traceback
             traceback.print_exc(file=sys.stderr)
             result = Result.error(1105, str(exc))
+        if self.array_output:
+            payload = render_assertion(result)
+            # The separator goes before the element, so the output stays
+            # valid JSON without a trailing comma.
+            if self._array_first:
+                self.out_stream.write(b"[\n")
+                self._array_first = False
+            else:
+                self.out_stream.write(b",\n")
+            self.out_stream.write(payload.encode("utf-8"))
+            self.out_stream.flush()
+            return
         if self.json_output:
             self.out_stream.write(
                 (render_json(result) + "\n").encode("utf-8")

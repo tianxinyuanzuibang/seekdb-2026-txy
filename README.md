@@ -61,6 +61,7 @@ variable and the Dockerfile can change it in one line:
 | `text` (default) | plain text, one response per statement, **no** echo, blank line as the response terminator. A query answers with the column header and the rows; a DML statement answers with a single `N row(s) affected` line |
 | `echo` | text that repeats the statement first, mysqltest `.result` style, no blank line |
 | `json` | one JSON object per statement: `{"columns":…,"rows":…,"affected_rows":…}` |
+| `jsonarray` | the whole stdout is **one JSON array** whose elements are the per-statement assertion objects (`{}`, `{"affected_rows":N}`, `{"error":"duplicate_key"}`, `{"columns":[…],"rows":[…]}`) — the same shape as the published `.result` files |
 | `mysql` | MySQL client/server protocol over the stdin/stdout pipes |
 | `auto` | sniff the first bytes and pick one |
 
