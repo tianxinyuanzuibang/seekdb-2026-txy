@@ -14,6 +14,7 @@ the *semantics* the contest grades:
 import heapq
 import math
 import os
+import struct
 
 from . import values as V
 from .errors import (SQLError, bad_field, duplicate_key, duplicate_key,
@@ -170,7 +171,27 @@ class Executor:
                     raise invalid_value(
                         "vector value must be a list of numbers"
                     )
-                raw = parsed
+                # The dimension is checked before the conversion, exactly as
+                # for the unquoted form.
+                if (column.vector_dim is not None
+                        and len(parsed) != column.vector_dim):
+                    raise invalid_value(
+                        "vector dimension mismatch: expected {}, "
+                        "got {}".format(column.vector_dim, len(parsed))
+                    )
+                # The parsed text still has to be validated and rounded to
+                # float32, so it goes through the normal conversion path
+                # rather than the tuple fast path below.
+                try:
+                    return V.to_float32_values(parsed)
+                except OverflowError:
+                    raise invalid_value(
+                        "vector element overflows float32 range"
+                    )
+                except (struct.error, TypeError):
+                    raise invalid_value(
+                        "vector value must be a list of numbers"
+                    )
             if not isinstance(raw, (tuple, list)):
                 raise invalid_value("vector value must be a list of numbers")
             if column.vector_dim is not None and len(raw) != column.vector_dim:
@@ -188,7 +209,13 @@ class Executor:
             try:
                 return V.to_float32_values(raw)
             except OverflowError:
-                raise invalid_value("vector element overflows float32 range")
+                raise invalid_value(
+                    "vector element overflows float32 range"
+                )
+            except (struct.error, TypeError):
+                raise invalid_value(
+                    "vector value must be a list of numbers"
+                )
         raise not_supported("unsupported column type {}".format(kind))
 
     # ------------------------------------------------------------------
@@ -497,6 +524,13 @@ class Executor:
             for name, expr in stmt.assignments:
                 index = self._column_index(table, name)
                 column = columns[index]
+                if column.name.lower() == table.primary_key.lower():
+                    # The statement does not require primary-key updates;
+                    # silently matching nothing would hide the mistake.
+                    raise not_supported(
+                        "updating the primary key '{}' is not supported"
+                        .format(table.primary_key)
+                    )
                 new_values[column.name] = self._coerce(
                     table, column, self._eval(expr, row, table)
                 )
@@ -539,7 +573,12 @@ class Executor:
                     raise invalid_value(
                         "distance functions require vector arguments"
                     )
-                value = V.to_float32_values(parsed)
+                try:
+                    value = V.to_float32_values(parsed)
+                except (OverflowError, struct.error, TypeError):
+                    raise invalid_value(
+                        "{} must be a list of numbers".format(label)
+                    )
             if not isinstance(value, tuple):
                 raise invalid_value(
                     "distance functions require vector arguments"
@@ -561,7 +600,12 @@ class Executor:
                 raise invalid_value(
                     "{} must be a list of numbers".format(label)
                 )
-            value = V.to_float32_values(parsed)
+            try:
+                value = V.to_float32_values(parsed)
+            except (OverflowError, struct.error, TypeError):
+                raise invalid_value(
+                    "{} must be a list of numbers".format(label)
+                )
         if not isinstance(value, tuple):
             raise invalid_value(
                 "{} must be a list of numbers".format(label)
@@ -614,8 +658,11 @@ class Executor:
     # ------------------------------------------------------------------
     def _exec_Begin(self, stmt, mode=None):
         if self.in_transaction:
-            raise SQLError(
-                1568, "Transaction already started", "25000"
+            # Nested transactions are not required by the statement, and
+            # silently treating the second BEGIN as a no-op would make the
+            # COMMIT/ROLLBACK pairing ambiguous.
+            raise not_supported(
+                "nested transactions are not supported"
             )
         self.storage.begin()
         self.in_transaction = True
@@ -791,6 +838,7 @@ class Executor:
             # ranking skip the per-row membership test.
             if cached is not None:
                 return None, dict(cached)
+
             keys_getter = getattr(self.storage, "cached_vector_pks", None)
             allowed = None
             if keys_getter is not None:
@@ -1028,9 +1076,12 @@ class Executor:
                     needed.append(name)
 
         distance = math.dist if function is V.l2_distance else function
-        limit = stmt.limit or 0
+        limit = stmt.limit
         offset = stmt.offset or 0
-        keep = (limit + offset) if limit else 0
+        # With no LIMIT every matching row is returned, so all candidates
+        # have to be kept; with a LIMIT only the best (limit + offset) are
+        # needed.
+        keep = (limit + offset) if limit is not None else None
 
         scanner = getattr(self.storage, "scan_columns", None)
         best = []
@@ -1045,15 +1096,16 @@ class Executor:
             if vector is None:
                 continue
             scored = (distance(vector, query), pk)
-            if keep:
-                if len(best) < keep:
+            if keep is None:
+                best.append(scored)
+            elif len(best) < keep:
+                best.append(scored)
+            elif best:
+                # keep the smallest ``keep`` by (distance, pk)
+                worst = max(best)
+                if scored < worst:
+                    best.remove(worst)
                     best.append(scored)
-                else:
-                    # keep the smallest ``keep`` by (distance, pk)
-                    worst = max(best)
-                    if scored < worst:
-                        best.remove(worst)
-                        best.append(scored)
         best.sort()
         ordered = [pk for _distance, pk in best]
         if offset:
@@ -1129,7 +1181,9 @@ class Executor:
                 has_cache = cache_getter(table) is not None
             except Exception:                      # pragma: no cover
                 has_cache = False
-        if not has_cache:
+        if not has_cache and not self.in_transaction:
+            # The streaming path reads committed rows only, so it must not be
+            # used inside a transaction where the overlay has to be visible.
             streamed = self._stream_vector_select(stmt, table, mode)
             if streamed is not None:
                 return streamed

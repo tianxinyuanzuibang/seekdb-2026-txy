@@ -119,14 +119,14 @@
       "id": "x2",
       "title": "单元测试",
       "command": "python3 -m unittest discover -s tests",
-      "output": "----------------------------------------------------------------------\nRan 189 tests in 1.987s\nOK",
+      "output": "----------------------------------------------------------------------\nRan 196 tests in 2.013s\nOK",
       "interpretation": "覆盖解析、存储、事务、恢复、索引、召回与材料校验。"
     },
     {
       "id": "x3",
       "title": "mysqltest 风格用例",
       "command": "python3 tests/run_tests.py",
-      "output": "[       OK ] vector\n5 case(s), 0 failure(s)",
+      "output": "[       OK ] vector\n6 case(s), 0 failure(s)",
       "interpretation": "basic / errors / transaction / vector 四例全过。"
     },
     {
@@ -154,7 +154,7 @@
       "id": "x7",
       "title": "小规模性能基准",
       "command": "python3 tests/bench.py --rows 3000 --queries 200",
-      "output": "  write:  0.412s  (3000 rows)\n  index:  0.130s\n  query:  3.267s  (200 queries, 16.33 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 43.3 MiB",
+      "output": "  write:  0.412s  (3000 rows)\n  index:  0.129s\n  query:  3.300s  (200 queries, 16.50 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 44.3 MiB",
       "interpretation": "写入/查询两阶段端到端耗时，用于回归。"
     },
     {
@@ -384,7 +384,7 @@
       "student_pointer": "/conversations/0/content",
       "student_evidence": "赛题一：完成一个轻量向量数据库（80 分）。我一上来先质疑题目性质：我刚看了一下是不是要求完全自己手搓一个新的？官方仓库我也给你，你自己上去看有没有东西。",
       "result_pointer": "/experiments/2/output",
-      "result_evidence": "5 case(s), 0 failure(s)",
+      "result_evidence": "6 case(s), 0 failure(s)",
       "reasoning": "结果集格式、错误码、就绪标识、模式参数拼写都未公开，无法用测试证明一致。与其赌一种格式，不如同时实现 mysqltest 风格行文本、MySQL wire 协议与 JSON，按首字节自动判定，并用真实 mysql 客户端验证 wire 模式可用。",
       "conclusion": "局限必须写清：仍无法证明与隐藏驱动字节级一致，因此把回显与搜索模式都做成环境变量，便于按平台反馈快速对齐。"
     }

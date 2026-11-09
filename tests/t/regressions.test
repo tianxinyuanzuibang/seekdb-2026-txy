@@ -10,3 +10,6 @@ select id, l2_distance(embedding, '[3,4]') as distance from docs where id = 1 or
 select id, l2_distance(embedding, '[0,0]') from docs order by id;
 select l2_distance(embedding, '[0,0]') from docs where id = 2;
 select id from docs where category >= '乙' order by id;
+select id, l2_distance(embedding, '[0,0]') as distance from docs order by distance;
+select id from docs order by l2_distance(embedding, '[0,0]') limit 10;
+select id from docs where category = '甲' order by l2_distance(embedding, '[0,0]') limit 10;

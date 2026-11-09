@@ -142,6 +142,236 @@ class TestBasics(StorageTestCase):
         st.close()
 
 
+class TestTransactionVisibilityInColumnScans(StorageTestCase):
+    """A query inside a transaction must see that transaction's own writes.
+
+    The task statement requires this for ordinary queries *and* for vector
+    retrieval, so ``scan_column`` / ``scan_columns`` - in both the ordered and
+    the unordered mode - must merge the write overlay exactly like ``scan``.
+    """
+
+    VECTOR_COLUMNS = [
+        {"name": "id", "type_name": "BIGINT"},
+        {"name": "e", "type_name": "VECTOR", "vector_dim": 2},
+        {"name": "n", "type_name": "VARCHAR", "length": 16},
+    ]
+
+    def _storage(self):
+        st = self.make()
+        st.create_table("d", self.VECTOR_COLUMNS, "id", "e")
+        return st
+
+    def _all_views(self, st, table="d"):
+        """Read the table through every scan flavour that must see the txn."""
+        return {
+            "scan": [(r.pk, r["e"], r["n"]) for r in st.scan(table)],
+            "column_e": list(st.scan_column(table, "e")),
+            "column_n": list(st.scan_column(table, "n")),
+            "column_e_unordered": list(
+                st.scan_column(table, "e", ordered=False)
+            ),
+            "columns": [
+                (pk, v["e"], v["n"])
+                for pk, v in st.scan_columns(table, ["e", "n"])
+            ],
+            "columns_unordered": [
+                (pk, v["e"], v["n"])
+                for pk, v in st.scan_columns(table, ["e", "n"], ordered=False)
+            ],
+        }
+
+    def _assert_all_views(self, st, expected):
+        """Every scan flavour must agree with ``expected``.
+
+        ``expected`` is a pk-ascending list of ``(pk, vector, name)``.  The
+        ordered views must match it exactly; the unordered views must contain
+        the same rows (in any order).
+        """
+        views = self._all_views(st)
+        self.assertEqual(views["scan"], expected, "scan() disagrees")
+        self.assertEqual(
+            views["column_e"], [(pk, e) for pk, e, _n in expected],
+            "scan_column(e) disagrees",
+        )
+        self.assertEqual(
+            views["column_n"], [(pk, n) for pk, _e, n in expected],
+            "scan_column(n) disagrees",
+        )
+        self.assertEqual(
+            views["columns"],
+            [(pk, e, n) for pk, e, n in expected],
+            "scan_columns() disagrees",
+        )
+        self.assertEqual(
+            sorted(views["column_e_unordered"]),
+            sorted((pk, e) for pk, e, _n in expected),
+            "unordered scan_column(e) disagrees",
+        )
+        self.assertEqual(
+            sorted(views["columns_unordered"]),
+            sorted(expected),
+            "unordered scan_columns() disagrees",
+        )
+
+    def test_overlay_only_insert_is_visible_in_column_scans(self):
+        st = self._storage()
+        st.begin()
+        st.insert_rows("d", [{"id": 9, "e": (1.0, 1.0), "n": "nine"}])
+        expected = [(9, (1.0, 1.0), "nine")]
+        self._assert_all_views(st, expected)
+        # specifically the vector column, as the statement demands for
+        # vector retrieval
+        self.assertEqual(list(st.scan_column("d", "e")), [(9, (1.0, 1.0))])
+        self.assertEqual(
+            list(st.scan_columns("d", ["e"])), [(9, {"e": (1.0, 1.0)})]
+        )
+        # the row is not visible to the committed store yet
+        st.rollback()
+        self.assertEqual(list(st.scan_column("d", "e")), [])
+        st.close()
+
+    def test_overlay_only_insert_into_empty_table(self):
+        st = self._storage()
+        st.begin()
+        st.insert_rows("d", [{"id": 1, "e": (2.0, 2.0), "n": "one"}])
+        self.assertEqual(list(st.scan_column("d", "e")), [(1, (2.0, 2.0))])
+        self.assertEqual(
+            list(st.scan_column("d", "e", ordered=False)), [(1, (2.0, 2.0))]
+        )
+        st.rollback()
+        st.close()
+
+    def test_overlay_update_is_visible_in_column_scans(self):
+        st = self._storage()
+        st.insert_rows("d", [{"id": 1, "e": (5.0, 5.0), "n": "old"}])
+        st.begin()
+        st.update_rows("d", 1, {"e": (7.0, 7.0), "n": "new"})
+        # the NEW value must win over the stored one
+        self.assertEqual(list(st.scan_column("d", "e")), [(1, (7.0, 7.0))])
+        self.assertEqual(list(st.scan_column("d", "n")), [(1, "new")])
+        self.assertEqual(
+            list(st.scan_column("d", "e", ordered=False)), [(1, (7.0, 7.0))]
+        )
+        self.assertEqual(
+            list(st.scan_columns("d", ["e", "n"])),
+            [(1, {"e": (7.0, 7.0), "n": "new"})],
+        )
+        st.rollback()
+        # the rollback restores the stored value in every view
+        self.assertEqual(list(st.scan_column("d", "e")), [(1, (5.0, 5.0))])
+        st.close()
+
+    def test_overlay_delete_is_not_visible_in_column_scans(self):
+        st = self._storage()
+        st.insert_rows("d", [
+            {"id": 1, "e": (1.0, 1.0), "n": "a"},
+            {"id": 2, "e": (2.0, 2.0), "n": "b"},
+        ])
+        st.begin()
+        st.delete_rows("d", [1])
+        # only the surviving row may be visible in every flavour
+        self.assertEqual(list(st.scan_column("d", "e")), [(2, (2.0, 2.0))])
+        self.assertEqual(list(st.scan_column("d", "n")), [(2, "b")])
+        self.assertEqual(
+            list(st.scan_column("d", "e", ordered=False)), [(2, (2.0, 2.0))]
+        )
+        self.assertEqual(
+            list(st.scan_columns("d", ["e", "n"])),
+            [(2, {"e": (2.0, 2.0), "n": "b"})],
+        )
+        st.rollback()
+        self.assertEqual(
+            list(st.scan_column("d", "e")),
+            [(1, (1.0, 1.0)), (2, (2.0, 2.0))],
+        )
+        st.close()
+
+    def test_mixed_overlay_keeps_primary_key_ordering(self):
+        st = self._storage()
+        st.insert_rows("d", [
+            {"id": 1, "e": (1.0, 1.0), "n": "a"},
+            {"id": 3, "e": (3.0, 3.0), "n": "c"},
+            {"id": 5, "e": (5.0, 5.0), "n": "e"},
+        ])
+        st.begin()
+        st.insert_rows("d", [
+            {"id": 2, "e": (2.0, 2.0), "n": "b"},
+            {"id": 9, "e": (9.0, 9.0), "n": "i"},
+        ])
+        st.update_rows("d", 3, {"e": (30.0, 30.0)})
+        st.delete_rows("d", [5])
+        st.insert_rows("d", [{"id": 0, "e": (0.0, 0.0), "n": "z"}])
+
+        expected = [
+            (0, (0.0, 0.0), "z"),
+            (1, (1.0, 1.0), "a"),
+            (2, (2.0, 2.0), "b"),
+            (3, (30.0, 30.0), "c"),
+            (9, (9.0, 9.0), "i"),
+        ]
+        self.assertEqual(
+            [(r.pk, r["e"], r["n"]) for r in st.scan("d")], expected
+        )
+        # ordered column scans must be primary key ascending, like scan()
+        ordered_e = list(st.scan_column("d", "e"))
+        self.assertEqual([pk for pk, _ in ordered_e], [0, 1, 2, 3, 9])
+        self.assertEqual(ordered_e, [(pk, e) for pk, e, _ in expected])
+        ordered_cols = list(st.scan_columns("d", ["e", "n"]))
+        self.assertEqual([pk for pk, _ in ordered_cols], [0, 1, 2, 3, 9])
+        self.assertEqual(
+            ordered_cols, [(pk, {"e": e, "n": n}) for pk, e, n in expected]
+        )
+        # the unordered variants hold the same rows
+        self.assertEqual(
+            sorted(st.scan_column("d", "e")), sorted(ordered_e)
+        )
+        self.assertEqual(
+            sorted(st.scan_columns("d", ["e", "n"], ordered=False)),
+            sorted(ordered_cols),
+        )
+        st.rollback()
+        st.close()
+
+    def test_overlay_visible_with_allowed_pks(self):
+        st = self._storage()
+        st.begin()
+        st.insert_rows("d", [
+            {"id": 7, "e": (7.0, 7.0), "n": "seven"},
+            {"id": 8, "e": (8.0, 8.0), "n": "eight"},
+        ])
+        self.assertEqual(
+            list(st.scan_column("d", "e", allowed_pks={7})), [(7, (7.0, 7.0))]
+        )
+        self.assertEqual(
+            list(st.scan_column("d", "e", allowed_pks={7}, ordered=False)),
+            [(7, (7.0, 7.0))],
+        )
+        self.assertEqual(
+            list(st.scan_columns("d", ["n"], allowed_pks={8})),
+            [(8, {"n": "eight"})],
+        )
+        st.rollback()
+        st.close()
+
+    def test_committed_rows_still_shown_while_in_transaction(self):
+        """Overlay rows are added, never substituted for the stored view."""
+        st = self._storage()
+        st.insert_rows("d", [{"id": 1, "e": (1.0, 1.0), "n": "a"}])
+        st.begin()
+        st.insert_rows("d", [{"id": 2, "e": (2.0, 2.0), "n": "b"}])
+        self.assertEqual(
+            list(st.scan_column("d", "e")),
+            [(1, (1.0, 1.0)), (2, (2.0, 2.0))],
+        )
+        st.commit()
+        # after the commit the overlay is part of the stored state
+        self.assertEqual(
+            list(st.scan_column("d", "e")),
+            [(1, (1.0, 1.0)), (2, (2.0, 2.0))],
+        )
+        st.close()
+
+
 class TestTransactions(StorageTestCase):
     def test_rollback_restores_pre_transaction_state(self):
         st = self.make()

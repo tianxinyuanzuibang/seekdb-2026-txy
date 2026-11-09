@@ -1,4 +1,7 @@
-# Transactions: commit, rollback, visibility, failure isolation.
+-- Transactions: commit, rollback, visibility, failure isolation.
+-- The statement requires that a transaction sees its own changes, including
+-- through vector retrieval, and that a failed statement leaves the
+-- transaction usable.
 create table tx1 (id bigint, v bigint, primary key (id));
 insert into tx1 values (1, 10);
 begin;

@@ -1866,10 +1866,14 @@ class Storage:
           those rows are decoded.  Rows outside the set are skipped without
           touching their payload at all.
         * ``ordered`` - when ``True`` (default) the results are yielded in
-          primary key ascending order, like :meth:`scan`.  This requires
-          buffering the requested column of every visible row.  When
-          ``False`` the rows are streamed in file order with O(1) memory,
-          which is what an intermediate filter/distance pass wants.
+          primary key ascending order, like :meth:`scan`.  When ``False``
+          the rows are streamed in file order with O(1) memory, which is
+          what an intermediate filter/distance pass wants.
+
+        Rows written by the current transaction are always included, and the
+        overlay version wins over the stored one, so a query inside an
+        explicit transaction sees its own changes (as the statement
+        requires).
         """
         self._ensure_open()
         tbl = self._resolve_table(table)
@@ -1885,6 +1889,10 @@ class Storage:
         if not ordered:
             for pk, values in self._iter_selected(
                 tbl, wanted_set, allowed_pks, verify=verify
+            ):
+                yield pk, values
+            for pk, values in self._iter_overlay_rows(
+                tbl, wanted_set, allowed_pks
             ):
                 yield pk, values
             return
@@ -1972,13 +1980,18 @@ class Storage:
                                      column_name)
 
     def _iter_selected(self, table, wanted_set, allowed_pks, verify=False):
-        """Yield ``(pk, {name: value})`` for the live rows of a table.
+        """Yield ``(pk, {name: value})`` for the *stored* live rows.
 
         Single sequential pass over the row log; only the columns in
         ``wanted_set`` are decoded.  When a complete decoded vector cache
         exists for the table, the vector column is taken from the cache and
         the encoded bytes are merely skipped - that removes the dominant
         per-row ``struct.unpack`` cost.
+
+        Rows that the current transaction overlay owns (inserted, updated or
+        deleted inside the transaction) are skipped here; the overlay version
+        is produced by :meth:`_iter_overlay_rows` instead, so callers that
+        need a full view must merge both streams.
         """
         log = self._log_for(table)
         limit = self._committed.get(table.id, (0, log.size))[1]
@@ -2031,6 +2044,32 @@ class Storage:
                 else:
                     pos = _value_span(payload, pos)
             yield pk, values
+
+    def _overlay_values(self, table, data, wanted_set):
+        """The wanted columns of one overlay row, as a dict."""
+        values = {}
+        for idx, col in enumerate(table.columns):
+            if idx in wanted_set:
+                values[col.name] = data.get(col.name)
+        return values
+
+    def _iter_overlay_rows(self, table, wanted_set, allowed_pks=None):
+        """Yield ``(pk, {name: value})`` for the rows of the write overlay.
+
+        These are the transaction's own uncommitted changes: rows inserted
+        or updated inside the transaction.  Deleted rows are not yielded.
+        Together with :meth:`_iter_selected` (which skips the very same
+        primary keys) this gives the complete view seen by the transaction.
+        """
+        overlay = self._overlay.get(table.id) if self._txn_active else None
+        if not overlay:
+            return
+        for pk, (kind, data) in overlay.items():
+            if kind != "row":
+                continue
+            if allowed_pks is not None and pk not in allowed_pks:
+                continue
+            yield pk, self._overlay_values(table, data, wanted_set)
 
     def _row_at(self, table, log, offset):
         record = log.read_frame(offset)
