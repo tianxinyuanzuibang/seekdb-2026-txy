@@ -1116,7 +1116,10 @@ class Executor:
                         row = self._row_from_values(table, values, pk)
                         if self._truthy(self._eval(stmt.where, row, table)):
                             filtered.add(pk)
-                wanted = limit if limit else len(needed)
+                # The index needs enough candidates to fill the top K
+                # after the exact re-rank, so ask for the full K (plus the
+                # offset) rather than the number of columns being read.
+                wanted = (limit + offset) if limit is not None else None
                 try:
                     candidates = index.search(query, wanted, filtered)
                 except Exception:                  # pragma: no cover
@@ -1130,6 +1133,19 @@ class Executor:
         keep = (limit + offset) if limit is not None else None
 
         best = []
+        # Collect the vectors along the way when the whole vector column is
+        # being read anyway; the storage layer installs them as its
+        # decoded-vector cache if they fit the budget, so the next query is
+        # served from memory instead of streaming again.
+        collect = (
+            len(needed) == 2
+            and vector_name in needed
+            and table.primary_key in needed
+            and stmt.where is None
+            and ann_allowed is None          # an ann pass sees only a subset
+            and getattr(self.storage, "cached_vectors", None) is not None
+        )
+        collected = {} if collect else None
         for pk, values in scanner(table, needed, ordered=False):
             if ann_allowed is not None and pk not in ann_allowed:
                 continue
@@ -1140,6 +1156,8 @@ class Executor:
             vector = values.get(vector_name)
             if vector is None:
                 continue
+            if collected is not None:
+                collected[pk] = vector
             scored = (distance(vector, query), pk)
             if keep is None:
                 best.append(scored)
@@ -1162,6 +1180,15 @@ class Executor:
             best.sort(key=lambda item: (-item[0], item[1]))
         else:
             best.sort()
+        if collected is not None and len(collected) > 1:
+            # Asking the storage layer to store the collected vectors keeps
+            # the budget policy in one place.
+            installer = getattr(self.storage, "_vector_cache_store", None)
+            if installer is not None:
+                try:
+                    installer(table, collected, sorted(collected), vector_name)
+                except Exception:              # pragma: no cover
+                    pass
         ordered = [pk for _distance, pk in best]
         if offset:
             ordered = ordered[offset:]
