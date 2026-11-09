@@ -26,6 +26,9 @@ from .ast_nodes import (Begin, Between, BinaryOp, ColumnRef, Commit,
                         Update, Use, VectorLiteral)
 from .results import Result
 
+# Upper bound on how many primary keys a cached filter result may hold.
+FILTER_CACHE_MAX_KEYS = 200000
+
 
 class Executor:
     """Executes statements against a :class:`minivectordb.storage.Storage`."""
@@ -894,7 +897,10 @@ class Executor:
             row = self._row_from_values(table, values, pk)
             if self._truthy(self._eval(stmt.where, row, table)):
                 allowed.add(pk)
-        if version is not None:
+        # Only cache a small enough key set: the resource tests include a
+        # data set larger than the memory budget, and caching millions of
+        # primary keys would defeat the point.
+        if version is not None and len(allowed) <= FILTER_CACHE_MAX_KEYS:
             self._filter_cache[cache_key] = (version, allowed)
         return allowed
 
@@ -989,6 +995,93 @@ class Executor:
                 continue
         return found
 
+    def _stream_vector_select(self, stmt, table, mode):
+        """Bounded-memory vector top-K.
+
+        Used when the storage layer has no decoded-vector cache (which is
+        exactly the "data larger than the memory budget" case).  The row log
+        is streamed once, only the needed columns are decoded, and only the
+        K best candidates are kept, so peak memory does not grow with the
+        table size.
+        """
+        columns = table.columns
+        vector_expr = stmt.vector_expr
+        canonical, function = V.get_distance_function(vector_expr.name)
+        column_index = self._column_index(table, vector_expr.args[0].name)
+        vector_name = columns[column_index].name
+        pk_index = self._column_index(table, table.primary_key)
+        vector_dim = columns[column_index].vector_dim
+        query = self._eval_vector_operand(
+            vector_expr.args[1], table, "query vector"
+        )
+        if vector_dim is not None and len(query) != vector_dim:
+            raise invalid_value(
+                "vector dimension mismatch: expected {}, got {}".format(
+                    vector_dim, len(query)
+                )
+            )
+
+        needed = [vector_name, table.primary_key]
+        if stmt.where is not None:
+            for name in self._columns_used_by(stmt.where, table):
+                if name not in needed:
+                    needed.append(name)
+
+        distance = math.dist if function is V.l2_distance else function
+        limit = stmt.limit or 0
+        offset = stmt.offset or 0
+        keep = (limit + offset) if limit else 0
+
+        scanner = getattr(self.storage, "scan_columns", None)
+        best = []
+        if scanner is None:
+            return None
+        for pk, values in scanner(table, needed, ordered=False):
+            if stmt.where is not None:
+                row = self._row_from_values(table, values, pk)
+                if not self._truthy(self._eval(stmt.where, row, table)):
+                    continue
+            vector = values.get(vector_name)
+            if vector is None:
+                continue
+            scored = (distance(vector, query), pk)
+            if keep:
+                if len(best) < keep:
+                    best.append(scored)
+                else:
+                    # keep the smallest ``keep`` by (distance, pk)
+                    worst = max(best)
+                    if scored < worst:
+                        best.remove(worst)
+                        best.append(scored)
+        best.sort()
+        ordered = [pk for _distance, pk in best]
+        if offset:
+            ordered = ordered[offset:]
+        if limit is not None:
+            ordered = ordered[:limit]
+
+        by_pk = {}
+        getter = getattr(self.storage, "get", None)
+        for pk in ordered:
+            try:
+                row = getter(table, pk) if getter is not None else None
+            except Exception:                      # pragma: no cover
+                row = None
+            if row is not None:
+                by_pk[pk] = list(row)
+        items = self._expand_items(stmt.items, columns)
+        result_rows = []
+        for pk in ordered:
+            row = by_pk.get(pk)
+            if row is None:
+                continue
+            result_rows.append(
+                [self._eval(item.expr, row, table) for item in items]
+            )
+        names = [item.alias or self._item_name(item, columns) for item in items]
+        return Result.ok(columns=names, rows=result_rows)
+
     def _exec_vector_select(self, stmt, table, mode):
         """Execute a vector Top-K search.
 
@@ -1026,6 +1119,20 @@ class Executor:
                     column.vector_dim, len(query)
                 )
             )
+
+        # When the storage layer holds no decoded-vector cache (a table
+        # larger than the memory budget), stream instead of materialising.
+        cache_getter = getattr(self.storage, "cached_vectors", None)
+        has_cache = False
+        if cache_getter is not None:
+            try:
+                has_cache = cache_getter(table) is not None
+            except Exception:                      # pragma: no cover
+                has_cache = False
+        if not has_cache:
+            streamed = self._stream_vector_select(stmt, table, mode)
+            if streamed is not None:
+                return streamed
 
         # --- step 1: the filtered candidate set ------------------------
         # The filter and the distance are evaluated over separate column

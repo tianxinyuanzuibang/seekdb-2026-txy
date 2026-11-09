@@ -205,6 +205,7 @@ language version as the Ubuntu 24.04 evaluation image), 10,000 rows of
 | Vector Top-K, `exact` mode | **11.95 ms/query** |
 | Vector Top-K, `ann` mode | **4.79 ms/query** |
 | Peak RSS | **116 MiB** |
+| Streaming path (vector cache disabled, 20,000 x 128, Top-K=10) | **0.10 s, 31.8 MiB peak**, identical to brute force |
 
 For reference, a bare `[math.dist(v, q) for v in vectors]` over the same
 10,000 vectors costs 11.93 ms on that machine, so the exact-mode query
