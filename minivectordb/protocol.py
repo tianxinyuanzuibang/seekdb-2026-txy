@@ -587,7 +587,12 @@ class LineProtocol:
         self.out_stream = out_stream
         self.runner = runner
         if echo is None:
-            echo = os.environ.get("MVD_ECHO", "1").strip() not in (
+            # Do NOT echo by default: the published `.result` files are JSON
+            # assertion objects, so the driver parses our stdout into
+            # columns/rows/affected_rows rather than diffing text, and it
+            # already knows the statement it sent.  In real mysqltest the
+            # echo is written by the client, not by the server.
+            echo = os.environ.get("MVD_ECHO", "0").strip() not in (
                 "0", "false", "no", "off",
             )
         self.echo = echo
@@ -597,6 +602,13 @@ class LineProtocol:
         # may want JSON back for plain SQL input.  Opt-in via MVD_OUTPUT=json.
         self.json_output = (
             os.environ.get("MVD_OUTPUT", "text").strip().lower() == "json"
+        )
+        # A line-oriented reader needs to know where a response ends.  A
+        # blank line is the conventional terminator and is also harmless for
+        # readers that ignore empty lines.
+        self.terminator = (
+            os.environ.get("MVD_TERMINATOR", "1").strip().lower()
+            not in ("0", "false", "no", "off", "")
         )
 
     def serve(self):
@@ -664,6 +676,8 @@ class LineProtocol:
             text = render_text(result)
             if text:
                 self.out_stream.write((text + "\n").encode("utf-8"))
+        if self.terminator:
+            self.out_stream.write(b"\n")
         if self.sentinel:
             # Opt-in end-of-result marker.  It makes the protocol easy to
             # drive programmatically (the benchmark does this).  It is off

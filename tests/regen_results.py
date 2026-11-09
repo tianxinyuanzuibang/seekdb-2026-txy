@@ -31,6 +31,10 @@ def run_case(test_path):
         env["MVD_DATA_DIR"] = data_dir
         env["MVD_PROTOCOL"] = "line"
         env["MVD_ECHO"] = "1"
+        # These cases are compared byte-for-byte against a stored .result in
+        # the classic mysqltest text form: statement echo, no blank-line
+        # terminator.
+        env["MVD_TERMINATOR"] = "0"
         env.pop("MVD_MODE", None)
         payload = "\n".join(statements) + "\n"
         proc = subprocess.run(

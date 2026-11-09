@@ -60,6 +60,8 @@ def query_raw(proc, sql):
         text = line.decode("utf-8").rstrip("\n")
         if text == SENTINEL:
             return rows
+        if not text:
+            continue
         if text.startswith("ERROR"):
             raise RuntimeError(text)
         rows.append(text.split("\t"))

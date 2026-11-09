@@ -50,6 +50,30 @@ All persistent files are written under `/data` (override with
 | `MVD_READY_ON_STDOUT` | unset | Also print the ready marker on stdout |
 | `MVD_SHOW_SQL` | unset | Log startup details to stderr |
 
+### Wire-framing profiles
+
+The statement defers the exact stdin/stdout framing to a test driver that is
+not published, so the framing is selectable with a single environment
+variable and the Dockerfile can change it in one line:
+
+| `MVD_PROFILE` | framing |
+|---|---|
+| `text` (default) | plain text, one response per statement, **no** echo, blank line as the response terminator |
+| `echo` | text that repeats the statement first, mysqltest `.result` style, no blank line |
+| `json` | one JSON object per statement: `{"columns":…,"rows":…,"affected_rows":…}` |
+| `mysql` | MySQL client/server protocol over the stdin/stdout pipes |
+| `auto` | sniff the first bytes and pick one |
+
+`MVD_PROFILE` only fills in variables that are not already set, so
+`MVD_ECHO`, `MVD_OUTPUT`, `MVD_TERMINATOR`, `MVD_PROTOCOL`, `MVD_MODE` and
+`MVD_READY_ON_STDOUT` still override any profile.
+
+Set it in the Dockerfile for a submission, for example:
+
+```dockerfile
+ENV MVD_PROFILE=json
+```
+
 ### Protocols
 
 The task package fixes the interface (SQL over stdin, results over stdout)

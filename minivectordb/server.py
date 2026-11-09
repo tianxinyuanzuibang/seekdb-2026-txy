@@ -28,6 +28,46 @@ from .storage import Storage
 DEFAULT_DATA_DIR = "/data"
 
 
+# Wire-framing presets.  The task statement defers the exact framing to a
+# test driver that is not published, so every plausible framing is available
+# as a one-word profile; MVD_PROFILE selects one and the individual
+# MVD_* variables still win over it.
+PROFILES = {
+    # plain text, one response per statement, blank line as the terminator,
+    # no echo (the driver owns the statements)
+    "text": {"MVD_PROTOCOL": "line", "MVD_OUTPUT": "text",
+             "MVD_ECHO": "0", "MVD_TERMINATOR": "1"},
+    # text that repeats the statement first, mysqltest .result style
+    "echo": {"MVD_PROTOCOL": "line", "MVD_OUTPUT": "text",
+             "MVD_ECHO": "1", "MVD_TERMINATOR": "0"},
+    # one JSON object per statement
+    "json": {"MVD_PROTOCOL": "line", "MVD_OUTPUT": "json",
+             "MVD_ECHO": "0", "MVD_TERMINATOR": "0"},
+    # MySQL client/server protocol over the stdin/stdout pipes
+    "mysql": {"MVD_PROTOCOL": "mysql", "MVD_OUTPUT": "text",
+              "MVD_ECHO": "0", "MVD_TERMINATOR": "0"},
+    # let the server sniff the first bytes
+    "auto": {"MVD_PROTOCOL": "auto"},
+}
+
+
+def apply_profile():
+    """Apply MVD_PROFILE without overriding explicitly set variables."""
+    name = (os.environ.get("MVD_PROFILE") or "").strip().lower()
+    if not name:
+        return
+    preset = PROFILES.get(name)
+    if preset is None:
+        sys.stderr.write(
+            "minivectordb: unknown MVD_PROFILE {!r}, known: {}\n".format(
+                name, ", ".join(sorted(PROFILES))
+            )
+        )
+        return
+    for key, value in preset.items():
+        os.environ.setdefault(key, value)
+
+
 def data_dir():
     return os.environ.get("MVD_DATA_DIR") or DEFAULT_DATA_DIR
 
@@ -133,6 +173,7 @@ def _install_signal_handlers(storage):
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     apply_arguments(argv)
+    apply_profile()
     in_stream = sys.stdin.buffer
     out_stream = sys.stdout.buffer
 
