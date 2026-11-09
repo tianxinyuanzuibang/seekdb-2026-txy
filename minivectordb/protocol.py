@@ -60,6 +60,12 @@ def _env_flag(name, default=False):
 _DIRECTIVE_RE = re.compile(r"--mode[ \t]+[A-Za-z]+")
 
 
+# Cheap pre-filter: the fast path only walks the gap character by character
+# when one of these appears in it.  "--\nmode" cannot happen because the
+# directive always sits on its own line.
+_DIRECTIVE_HINT = "--mode"
+
+
 def _directive_at(text, index):
     """True when a driver directive starts at ``index``."""
     if not text.startswith("--mode", index):
@@ -105,7 +111,8 @@ def _scan_state(text, start=0):
             # literal uses square brackets and a CREATE TABLE or a function
             # argument list uses round ones, and the statement only ends
             # when all of them are closed again.
-            if ";" in gap or "--" in gap or "#" in gap or "(" in gap:
+            if (";" in gap or "--" in gap or "#" in gap
+                    or _DIRECTIVE_HINT in gap):
                 index = _scan_gap(text, position, end, depth)
                 if isinstance(index, tuple):
                     return index[0], index[1], index[2], index[3], index[4]
@@ -132,11 +139,17 @@ def _scan_state(text, start=0):
 
 
 def _scan_gap(text, begin, end, depth):
-    """Carefully scan a gap that may contain comments or a semicolon."""
+    """Carefully scan a gap that may contain comments, a semicolon or a
+    driver directive."""
     i = begin
     while i < end:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < end else ""
+        if _directive_at(text, i):
+            import os as _os
+            if _os.environ.get("MVD_TRACE_SCAN"):
+                sys.stderr.write("TRACE-DIR at %d\n" % i)
+            return (False, False, False, depth, i)
         if ch == "-" and nxt == "-":
             newline = text.find("\n", i)
             i = end if newline == -1 or newline > end else newline + 1
@@ -672,33 +685,40 @@ class LineProtocol:
             else:
                 self.pending += text
             # Consume every complete statement that is now buffered.  The
-            # splitter understands driver directives ("--mode ann"), which
-            # are not SQL and have to end the preceding statement.
+            # scan is a single pass over the buffer (fast, C-level counting
+            # for the common case) and it stops at a driver directive just
+            # like it stops at a semicolon, so "--mode ann" ends the
+            # statement that precedes it.
             while True:
                 if not self.pending.strip():
                     self.pending = ""
                     break
-                items = split_statements(self.pending)
-                if not items:
-                    break
-                text_only, terminated = items[0]
-                if not terminated and not text_only.strip():
-                    # An empty chunk (for example the newline that follows a
-                    # driver directive) carries nothing: consume it and go on
-                    # instead of waiting for more input.
-                    consumed = len(text_only)
-                    self.pending = self.pending[consumed:]
-                    continue
-                if not terminated and not _is_balanced(text_only):
-                    # Incomplete statement - wait for more input.
-                    break
-                consumed = len(text_only)
-                if terminated:
-                    consumed += 1
-                self.pending = self.pending[consumed:]
-                text_only = text_only.strip()
-                if text_only:
-                    self._run(text_only)
+                in_single, in_double, in_backtick, depth, semi = \
+                    _scan_state(self.pending)
+                if semi >= 0:
+                    statement = self.pending[:semi]
+                    if self.pending[semi:semi + 2] == "--":
+                        # A directive boundary: take the whole line, which
+                        # the driver guarantees to be alone on its line.
+                        end = self.pending.find("\n", semi)
+                        if end == -1:
+                            statement = self.pending[semi:]
+                            self.pending = ""
+                        else:
+                            statement = self.pending[semi:end]
+                            self.pending = self.pending[end + 1:]
+                    else:
+                        # A semicolon: consume it.
+                        self.pending = self.pending[semi + 1:]
+                else:
+                    if in_single or in_double or in_backtick or depth > 0:
+                        # Incomplete statement - wait for more input.
+                        break
+                    statement = self.pending
+                    self.pending = ""
+                statement = statement.strip()
+                if statement:
+                    self._run(statement)
         if self.pending.strip():
             for text_only, _ in split_statements(self.pending):
                 if text_only.strip():
