@@ -1,0 +1,22 @@
+-- Statement atomicity and ORDER BY direction.
+-- The statement requires that a failed statement leaves no partial
+-- modification, and that ORDER BY DESC is honoured (including for the
+-- distance of a vector search).
+create table at1 (id bigint primary key, c varchar(8), src varchar(20));
+insert into at1 values (1, 'a', 'ok'), (2, 'b', 'toolongvalue');
+update at1 set c = src where id > 0;
+select id, c from at1 order by id;
+update at1 set c = 'z' where id = 1;
+select id, c from at1 order by id;
+create table at2 (id bigint primary key, e vector(2), s varchar(20));
+insert into at2 values (1, '[0,0]', '[9,9]'), (2, '[1,1]', '[1,2,3]');
+update at2 set e = s where id > 0;
+select id, e from at2 order by id;
+create table at3 (id bigint primary key, e vector(2), c varchar(8));
+insert into at3 values (1, '[0,0]', 'x'), (2, '[1,0]', 'y'), (3, '[2,0]', 'y');
+select id, l2_distance(e, '[0,0]') as d from at3 order by d limit 2;
+select id, l2_distance(e, '[0,0]') as d from at3 order by d desc limit 2;
+select id from at3 order by l2_distance(e, '[0,0]') limit 2;
+select id from at3 order by l2_distance(e, '[0,0]') desc limit 2;
+select id from at3 where c = 'y' order by l2_distance(e, '[0,0]') desc limit 2;
+select id from at3 order by l2_distance(e, '[0,0]') limit 2;

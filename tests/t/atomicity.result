@@ -1,0 +1,54 @@
+create table at1 (id bigint primary key, c varchar(8), src varchar(20));
+Table 'at1' created
+insert into at1 values (1, 'a', 'ok'), (2, 'b', 'toolongvalue');
+2 row(s) affected
+update at1 set c = src where id > 0;
+ERROR 1406: Data too long for column 'c' at row 1
+select id, c from at1 order by id;
+id	c
+1	a
+2	b
+update at1 set c = 'z' where id = 1;
+1 row(s) affected
+select id, c from at1 order by id;
+id	c
+1	z
+2	b
+create table at2 (id bigint primary key, e vector(2), s varchar(20));
+Table 'at2' created
+insert into at2 values (1, '[0,0]', '[9,9]'), (2, '[1,1]', '[1,2,3]');
+2 row(s) affected
+update at2 set e = s where id > 0;
+ERROR 1292: vector dimension mismatch: expected 2, got 3
+select id, e from at2 order by id;
+id	e
+1	[0,0]
+2	[1,1]
+create table at3 (id bigint primary key, e vector(2), c varchar(8));
+Table 'at3' created
+insert into at3 values (1, '[0,0]', 'x'), (2, '[1,0]', 'y'), (3, '[2,0]', 'y');
+3 row(s) affected
+select id, l2_distance(e, '[0,0]') as d from at3 order by d limit 2;
+id	d
+1	0
+2	1
+select id, l2_distance(e, '[0,0]') as d from at3 order by d desc limit 2;
+id	d
+3	2
+2	1
+select id from at3 order by l2_distance(e, '[0,0]') limit 2;
+id
+1
+2
+select id from at3 order by l2_distance(e, '[0,0]') desc limit 2;
+id
+3
+2
+select id from at3 where c = 'y' order by l2_distance(e, '[0,0]') desc limit 2;
+id
+3
+2
+select id from at3 order by l2_distance(e, '[0,0]') limit 2;
+id
+1
+2

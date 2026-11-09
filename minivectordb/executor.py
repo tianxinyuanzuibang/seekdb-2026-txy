@@ -49,6 +49,8 @@ class Executor:
         self._filter_cache = {}
         # The K of the search currently being executed.
         self._search_limit = None
+        # True when the distance ORDER BY term asked for DESC.
+        self._vector_descending = False
 
     # ------------------------------------------------------------------
     # dispatch
@@ -514,8 +516,11 @@ class Executor:
         table = self._table(stmt.table)
         columns = table.columns
         pk_index = self._column_index(table, table.primary_key)
-        pk_name = table.primary_key
-        targets = []
+        # The statement requires that a failed statement leaves no partial
+        # modification, so the whole statement is validated first and only
+        # then applied.  Otherwise a row that fails half way through would
+        # leave the rows processed before it modified.
+        planned = []
         for row in self.storage.scan(table):
             if stmt.where is not None:
                 if not self._truthy(self._eval(stmt.where, row, table)):
@@ -536,11 +541,13 @@ class Executor:
                 )
             if not new_values:
                 continue
-            self.storage.update_rows(table, row[pk_index], new_values)
-            targets.append(row[pk_index])
+            planned.append((row[pk_index], new_values))
+        # Everything validated: now apply.
+        for pk, new_values in planned:
+            self.storage.update_rows(table, pk, new_values)
         return Result.ok(
-            message="{} row(s) affected".format(len(targets)),
-            affected_rows=len(targets),
+            message="{} row(s) affected".format(len(planned)),
+            affected_rows=len(planned),
         )
 
     def _exec_Delete(self, stmt, mode=None):
@@ -640,15 +647,18 @@ class Executor:
         return terms
 
     def _find_vector_expr(self, terms):
-        """The first ORDER BY term that is a distance-function call."""
-        for expr, _ascending in terms:
+        """The first ORDER BY term that is a distance-function call.
+
+        Returns ``(expression, descending)``.
+        """
+        for expr, ascending in terms:
             if isinstance(expr, FunctionCall):
                 try:
                     V.get_distance_function(expr.name)
                 except SQLError:
                     continue
-                return expr
-        return None
+                return expr, not ascending
+        return None, False
 
     def _truthy(self, value):
         return bool(value) if value is not None else False
@@ -694,13 +704,19 @@ class Executor:
 
         # Resolve ORDER BY aliases; this also recognises the vector-search
         # form `SELECT ... AS distance ... ORDER BY distance`.
+        #
+        # The direction is taken from the ORDER BY terms on every statement:
+        # the parser may already have marked the statement as a vector
+        # search, and the flag has to be reset each time or a previous
+        # statement's DESC would leak into this one.
+        self._vector_descending = False
         if stmt.order_by:
             stmt.order_by = self._resolve_order_terms(stmt, table)
-            if not stmt.is_vector_search:
-                found = self._find_vector_expr(stmt.order_by)
-                if found is not None:
-                    stmt.vector_expr = found
-                    stmt.is_vector_search = True
+            found, descending = self._find_vector_expr(stmt.order_by)
+            if found is not None:
+                stmt.vector_expr = found
+                stmt.is_vector_search = True
+                self._vector_descending = descending
 
         if stmt.is_vector_search and stmt.vector_expr is not None:
             return self._exec_vector_select(stmt, table, mode)
@@ -1101,12 +1117,22 @@ class Executor:
             elif len(best) < keep:
                 best.append(scored)
             elif best:
-                # keep the smallest ``keep`` by (distance, pk)
-                worst = max(best)
-                if scored < worst:
-                    best.remove(worst)
-                    best.append(scored)
-        best.sort()
+                if self._vector_descending:
+                    # keep the largest ``keep`` by (distance, -pk)
+                    worst = min(best, key=lambda item: (item[0], -item[1]))
+                    if (scored[0], -scored[1]) > (worst[0], -worst[1]):
+                        best.remove(worst)
+                        best.append(scored)
+                else:
+                    # keep the smallest ``keep`` by (distance, pk)
+                    worst = max(best)
+                    if scored < worst:
+                        best.remove(worst)
+                        best.append(scored)
+        if self._vector_descending:
+            best.sort(key=lambda item: (-item[0], item[1]))
+        else:
+            best.sort()
         ordered = [pk for _distance, pk in best]
         if offset:
             ordered = ordered[offset:]
@@ -1326,7 +1352,10 @@ class Executor:
             if vector is None:
                 continue
             scored.append((function(vector, query), identifier))
-        scored.sort(key=lambda item: (item[0], item[1]))
+        if self._vector_descending:
+            scored.sort(key=lambda item: (-item[0], item[1]))
+        else:
+            scored.sort(key=lambda item: (item[0], item[1]))
         return [item[1] for item in scored]
 
     def _exact_order(self, table, allowed, vectors, function, query):
@@ -1356,12 +1385,23 @@ class Executor:
                 for identifier, vector in vectors.items()
                 if vector is not None and identifier in allowed
             ]
+        descending = self._vector_descending
         if limit is None or limit >= len(scored):
-            scored.sort()
+            if descending:
+                # Farthest first; ties still break by ascending primary key.
+                scored.sort(key=lambda item: (-item[0], item[1]))
+            else:
+                scored.sort()
             return [item[1] for item in scored]
         # Keep only the K best.  The pairs are (distance, id), so plain
         # tuple ordering already breaks ties by ascending id.
-        best = heapq.nsmallest(limit, scored)
+        if descending:
+            best = heapq.nlargest(
+                limit, scored, key=lambda item: (item[0], -item[1])
+            )
+            best.sort(key=lambda item: (-item[0], item[1]))
+        else:
+            best = heapq.nsmallest(limit, scored)
         return [item[1] for item in best]
 
     def _resolve_mode(self, stmt, mode=None):
