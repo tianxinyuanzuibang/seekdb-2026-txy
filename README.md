@@ -7,7 +7,11 @@ Everything is implemented in this repository on top of the **Python standard
 library only**. No SQLite, no RocksDB, no Faiss, no HNSWlib, no third-party
 SQL parser and no third-party vector index.
 
-* Language: Python 3.11+ (the image ships Python 3.12 from Ubuntu 24.04)
+* Language: Python 3.11+ (the image installs the distribution `python3`,
+  which is 3.12 on Ubuntu 24.04); the code targets Linux x86_64.
+* **Locked dependencies: none.** The database imports only the Python
+  standard library, so there is no `requirements.txt` and nothing to pin.
+  The only build-stage download is the distribution `python3` package.
 * Storage, query execution, vector index and transaction handling: all
   hand-written in `minivectordb/`
 
@@ -125,8 +129,32 @@ select id from docs;            -- the change is gone
 create vector index idx_docs on docs(embedding);
 ```
 
-Restarting the container reuses the same `/data` directory and yields
-exactly the same contents.
+### Restarting
+
+All state lives in `/data`, so pointing a new process at the same directory
+resumes exactly where the previous one stopped. This also covers the crash
+case: the process may be killed at any moment and the committed data is
+still there after the restart.
+
+```bash
+# first run: create and fill the database, then shut down cleanly
+docker run --rm -i -v mvd-data:/data minivectordb:latest <<'SQL'
+create table docs (id bigint, title varchar(64), emb vector(3), primary key (id));
+insert into docs values (1, 'alpha', [0,0,0]);
+insert into docs values (2, 'beta',  [1,0,0]);
+SQL
+
+# second run: same /data volume, the rows are still there
+docker run --rm -i -v mvd-data:/data minivectordb:latest <<'SQL'
+select id, title from docs order by id;
+select id from docs order by l2_distance(emb, [0,0,0]) limit 2;
+SQL
+```
+
+A hard kill (`docker kill`, `SIGKILL`) is recovered the same way: the
+write-ahead log is replayed on start-up and only committed transactions
+are applied. An explicit transaction that was never committed is rolled
+back on the next start.
 
 ---
 
@@ -194,7 +222,15 @@ ERROR 1062: Duplicate entry '1' for key 'PRIMARY'
 ERROR 1146: Table 'test.nosuch' doesn't exist
 ERROR 1054: Unknown column 'nosuchcol' in 'field list'
 ERROR 1406: Data too long for column 'name' at row 1
+ERROR 1048: Column 'id' cannot be null
+ERROR 1136: Column count doesn't match value count at row 1
+ERROR 1068: Only one vector column is allowed per table
+ERROR 1062: The primary key must be a BIGINT column
 ```
+
+Rejected statements leave no partial modification, and a rejected statement
+inside an explicit transaction does not abort the transaction: the earlier
+successful statements can still be committed or rolled back.
 
 ---
 
