@@ -101,14 +101,18 @@ def _scan_state(text, start=0):
 
         if gap:
             # Comments and semi-colons need care; anything else is a pure
-            # bracket-counting job.
-            if ";" in gap or "--" in gap or "#" in gap:
+            # bracket-counting job.  Both kinds of bracket count: a vector
+            # literal uses square brackets and a CREATE TABLE or a function
+            # argument list uses round ones, and the statement only ends
+            # when all of them are closed again.
+            if ";" in gap or "--" in gap or "#" in gap or "(" in gap:
                 index = _scan_gap(text, position, end, depth)
                 if isinstance(index, tuple):
                     return index[0], index[1], index[2], index[3], index[4]
                 depth = index
             else:
                 depth += gap.count("[") - gap.count("]")
+                depth += gap.count("(") - gap.count(")")
                 if depth < 0:
                     depth = 0
 
@@ -145,9 +149,9 @@ def _scan_gap(text, begin, end, depth):
             close = text.find("*/", i + 2)
             i = end if close == -1 else close + 2
             continue
-        if ch == "[":
+        if ch in ("[", "("):
             depth += 1
-        elif ch == "]":
+        elif ch in ("]", ")"):
             depth -= 1
             if depth < 0:
                 depth = 0
