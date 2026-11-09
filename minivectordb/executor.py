@@ -11,6 +11,7 @@ the *semantics* the contest grades:
 * deterministic ordering (ties broken by primary key ascending).
 """
 
+import heapq
 import math
 import os
 
@@ -39,6 +40,11 @@ class Executor:
         self._indexes = {}
         # Cache of column name -> position, keyed by table identity.
         self._column_cache = {}
+        # Cache of filter results: (table, columns, filter shape) ->
+        # (data version, matching primary keys).
+        self._filter_cache = {}
+        # The K of the search currently being executed.
+        self._search_limit = None
 
     # ------------------------------------------------------------------
     # dispatch
@@ -181,6 +187,8 @@ class Executor:
             except OverflowError:
                 raise invalid_value("vector element overflows float32 range")
         if isinstance(expr, ColumnRef):
+            if table is None:
+                raise bad_field(expr.name)
             index = self._column_index(table, expr.name)
             return row[index]
         if isinstance(expr, UnaryOp):
@@ -626,108 +634,184 @@ class Executor:
         names = [item.alias or self._item_name(item, columns) for item in items]
         return Result.ok(columns=names, rows=[values])
 
+    def _data_version(self, table):
+        """The storage layer's version counter for ``table``.
+
+        It changes whenever the visible contents of the table change, so a
+        cached filter result can be invalidated.  ``None`` means the
+        storage layer does not provide one, and caching is then disabled.
+        """
+        getter = getattr(self.storage, "data_version", None)
+        if getter is None:
+            return None
+        try:
+            return getter(table)
+        except Exception:                          # pragma: no cover
+            return None
+
     def _collect_candidates(self, table, stmt, column_index):
         """Collect the rows that satisfy the WHERE clause.
 
-        Returns ``(rows, vectors)`` where ``rows`` are the matching rows
-        and ``vectors`` maps a primary key to its vector value.
+        Returns ``(allowed_pks, vectors)`` where ``allowed_pks`` is the set
+        of matching primary keys and ``vectors`` maps a primary key to its
+        vector value.
 
-        When the storage layer offers a streaming column scan, the filter
-        and the vector are read in separate sequential passes so that the
-        row log is read once per needed column instead of once per row.
+        The work is split so that the row log is read as cheaply as
+        possible:
+
+        * the filter pass only decodes the columns the WHERE clause needs,
+        * the vector column comes from the storage layer's vector cache
+          when it is available,
+        * the rows that are finally returned are fetched by key.
         """
-        scanner = getattr(self.storage, "scan_columns", None)
         pk_index = self._column_index(table, table.primary_key)
         vector_name = table.columns[column_index].name
+        cache_getter = getattr(self.storage, "cached_vectors", None)
+        cached = None
+        if cache_getter is not None:
+            cached = cache_getter(table)
 
-        if scanner is not None and stmt.where is not None:
-            try:
-                return self._collect_candidates_streaming(
-                    table, stmt, column_index, pk_index, vector_name, scanner
-                )
-            except (NotImplementedError, AttributeError):
-                pass
+        if stmt.where is None:
+            # No filter: every visible row is a candidate.  When the vector
+            # cache is complete, ``None`` means "all rows" and lets the
+            # ranking skip the per-row membership test.
+            if cached is not None:
+                return None, dict(cached)
+            keys_getter = getattr(self.storage, "cached_vector_pks", None)
+            allowed = None
+            if keys_getter is not None:
+                keys = keys_getter(table)
+                if keys is not None:
+                    allowed = set(keys)
+            if allowed is None:
+                keys = getattr(self.storage, "scan_column", None)
+                if keys is not None and hasattr(
+                    self.storage, "cached_vectors"
+                ):
+                    allowed = {
+                        pk for pk, _value in keys(
+                            table, table.primary_key, ordered=False
+                        )
+                    }
+                else:
+                    allowed = {row[pk_index] for row in self.storage.scan(table)}
+        else:
+            scanner = getattr(self.storage, "scan_columns", None)
+            if scanner is None:
+                rows = [
+                    row for row in self.storage.scan(table)
+                    if self._truthy(self._eval(stmt.where, row, table))
+                ]
+                allowed = {row[pk_index] for row in rows}
+                vectors = {
+                    row[pk_index]: row[column_index] for row in rows
+                }
+                return allowed, vectors
+            allowed = self._filtered_keys(table, stmt, vector_name, scanner)
 
-        rows = list(self.storage.scan(table))
-        if stmt.where is not None:
-            rows = [
-                row for row in rows
-                if self._truthy(self._eval(stmt.where, row, table))
-            ]
-        vectors = {row[pk_index]: row[column_index] for row in rows}
-        allowed = set(vectors)
+        vectors = {}
+        if cached is not None:
+            for identifier in allowed:
+                vector = cached.get(identifier)
+                if vector is not None:
+                    vectors[identifier] = vector
+            if len(vectors) == len(allowed):
+                return allowed, vectors
+            # The cache does not cover every candidate (a table may have
+            # more than one vector column, or the cache may be partial),
+            # so fall through and read the missing ones.
+            for identifier in list(allowed):
+                if identifier not in vectors:
+                    allowed.discard(identifier)
+            if not vectors:
+                return allowed, vectors
+
+        column_scanner = getattr(self.storage, "scan_column", None)
+        missing = allowed - set(vectors)
+        if missing:
+            if column_scanner is not None:
+                # A scan without a key restriction is what populates the
+                # storage layer's decoded-vector cache, so prefer that when
+                # most of the table is wanted anyway.
+                restricted = missing
+                if len(missing) * 2 >= len(allowed):
+                    restricted = None
+                for pk, value in column_scanner(
+                    table, vector_name, allowed_pks=restricted, ordered=False
+                ):
+                    if value is None:
+                        continue
+                    if pk in allowed:
+                        vectors[pk] = value
+                after = getattr(self.storage, "cached_vectors", None)
+                if after is not None:
+                    fresh = after(table)
+                    if fresh is not None:
+                        for identifier in allowed:
+                            vector = fresh.get(identifier)
+                            if vector is not None:
+                                vectors[identifier] = vector
+            else:
+                scanner = getattr(self.storage, "scan_columns", None)
+                for pk, values in scanner(table, vector_name,
+                                         allowed_pks=missing, ordered=False):
+                    value = values.get(vector_name)
+                    if value is not None:
+                        vectors[pk] = value
         return allowed, vectors
 
-    def _collect_candidates_streaming(self, table, stmt, column_index,
-                                      pk_index, vector_name, scanner):
-        """Two-pass candidate collection using the streaming column scan.
+    def _filtered_keys(self, table, stmt, vector_name, scanner):
+        """The primary keys that satisfy the WHERE clause.
 
-        Pass 1 reads only the columns the WHERE clause needs and yields
-        the matching primary keys.  Pass 2 reads the vector column for
-        exactly those keys.  The final rows are then fetched by key.
+        The result is cached per (table, filter shape) and invalidated by
+        the storage layer's data version, so a repeated query over an
+        unchanged table does not have to re-read the filter column.
         """
         needed = self._columns_used_by(stmt.where, table)
         needed = [name for name in needed if name != vector_name]
         if not needed:
             needed = [table.primary_key]
+
+        cache_key = (id(table), tuple(needed), _filter_shape(stmt.where))
+        version = self._data_version(table)
+        cached = self._filter_cache.get(cache_key)
+        if cached is not None and version is not None and cached[0] == version:
+            return set(cached[1])
+
         allowed = set()
         for pk, values in scanner(table, needed, ordered=False):
             row = self._row_from_values(table, values, pk)
             if self._truthy(self._eval(stmt.where, row, table)):
                 allowed.add(pk)
-
-        vectors = {}
-        column_scanner = getattr(self.storage, "scan_column", None)
-
-        # The storage layer keeps a bounded cache of the decoded vectors.
-        # When it is complete, the vector column does not have to be read
-        # and decoded again for every query.
-        cached = None
-        cache_getter = getattr(self.storage, "cached_vectors", None)
-        if cache_getter is not None:
-            cached = cache_getter(table)
-        if cached is None:
-            # No cache yet: read the vector column.  This populates the
-            # cache, so the next query is served from memory.
-            if column_scanner is not None:
-                for pk, value in column_scanner(
-                    table, vector_name, allowed_pks=allowed, ordered=False
-                ):
-                    if value is not None:
-                        vectors[pk] = value
-            else:
-                for pk, values in scanner(table, vector_name,
-                                         allowed_pks=allowed, ordered=False):
-                    value = values.get(vector_name)
-                    if value is not None:
-                        vectors[pk] = value
-            if cache_getter is not None:
-                cached = cache_getter(table)
-            if cached is not None:
-                # The cache is authoritative; use it for the rows that were
-                # just read as well.
-                for identifier in allowed:
-                    vector = cached.get(identifier)
-                    if vector is not None:
-                        vectors[identifier] = vector
-        else:
-            for identifier in allowed:
-                vector = cached.get(identifier)
-                if vector is not None:
-                    vectors[identifier] = vector
-
-        return allowed, vectors
+        if version is not None:
+            self._filter_cache[cache_key] = (version, allowed)
+        return allowed
 
     def _rows_for(self, table, pks):
         """Fetch the full rows of the given primary keys.
 
         Only the rows that are actually returned are materialised; the
-        rest of the candidate set never has to be decoded.
+        rest of the candidate set never has to be decoded.  Each row is
+        fetched directly by its key, so this costs one lookup per
+        returned row rather than a pass over the whole table.
         """
         if not pks:
             return []
-        wanted = set(pks)
         rows = []
+        getter = getattr(self.storage, "get", None)
+        if getter is not None:
+            for pk in pks:
+                try:
+                    row = getter(table, pk)
+                except Exception:                  # pragma: no cover
+                    row = None
+                if row is None:
+                    continue
+                rows.append(list(row))
+            if len(rows) == len(pks):
+                return rows
+            rows = []
+        wanted = set(pks)
         scanner = getattr(self.storage, "scan_columns", None)
         if scanner is not None:
             names = [c.name for c in table.columns]
@@ -847,14 +931,19 @@ class Executor:
         limit = stmt.limit
         offset = stmt.offset or 0
 
-        if search_mode == "ann":
-            ordered = self._ann_order(
-                table, allowed, vectors, function, query, limit,
-            )
-        else:
-            ordered = self._exact_order(
-                table, allowed, vectors, function, query,
-            )
+        # The ranking only has to keep the K best candidates.
+        self._search_limit = limit
+        try:
+            if search_mode == "ann":
+                ordered = self._ann_order(
+                    table, allowed, vectors, function, query, limit,
+                )
+            else:
+                ordered = self._exact_order(
+                    table, allowed, vectors, function, query,
+                )
+        finally:
+            self._search_limit = None
 
         if offset:
             ordered = ordered[offset:]
@@ -933,7 +1022,7 @@ class Executor:
         the exact mode (the approximation only affects *which* rows are
         considered, not how they are ranked).
         """
-        if not allowed:
+        if allowed is not None and not allowed:
             return []
         index = self._vector_index_for(table)
         if index is None:
@@ -941,17 +1030,20 @@ class Executor:
         # Asking for more than K candidates is wasted work, but asking for
         # fewer would break the "fewer than K matches returns all of them"
         # rule, so the whole allowed set is used when it is smaller than K.
-        wanted = min(len(allowed), limit) if limit else len(allowed)
+        total = len(vectors) if allowed is None else len(allowed)
+        wanted = min(total, limit) if limit else total
         candidates = index.search(query, wanted, allowed)
         chosen = []
         seen = set()
         for entry in candidates:
             identifier = entry[0] if isinstance(entry, tuple) else entry
-            if identifier in seen or identifier not in allowed:
+            if identifier in seen:
+                continue
+            if allowed is not None and identifier not in allowed:
                 continue
             seen.add(identifier)
             chosen.append(identifier)
-        if len(chosen) < min(len(allowed), limit or len(allowed)):
+        if len(chosen) < min(total, limit or total):
             # The index could not produce enough candidates (for example a
             # very small table); fall back to the exact ordering so the
             # result is never short.
@@ -971,17 +1063,33 @@ class Executor:
         """Rank the candidate rows by their exact distance.
 
         Ties are broken by primary key ascending, as the statement
-        requires.
+        requires.  Only the K best candidates are kept, so the cost is
+        O(n log k) instead of sorting the whole candidate set.
+
+        ``allowed`` may be ``None``, meaning "every row in ``vectors``" -
+        that lets the unfiltered case skip the per-row membership test.
         """
-        scored = []
-        for identifier, vector in vectors.items():
-            if identifier not in allowed:
-                continue
-            if vector is None:
-                continue
-            scored.append((function(vector, query), identifier))
-        scored.sort(key=lambda item: (item[0], item[1]))
-        return [item[1] for item in scored]
+        limit = self._search_limit
+        if allowed is None:
+            scored = [
+                (function(vector, query), identifier)
+                for identifier, vector in vectors.items()
+                if vector is not None
+            ]
+        else:
+            scored = [
+                (function(vector, query), identifier)
+                for identifier, vector in vectors.items()
+                if vector is not None and identifier in allowed
+            ]
+        if limit is None or limit >= len(scored):
+            scored.sort(key=lambda item: (item[0], item[1]))
+            return [item[1] for item in scored]
+        # Keep only the K best instead of sorting everything.
+        best = heapq.nsmallest(
+            limit, scored, key=lambda item: (item[0], item[1])
+        )
+        return [item[1] for item in best]
 
     def _resolve_mode(self, stmt, mode=None):
         """Decide between exact and approximate search.
@@ -1115,7 +1223,54 @@ class _SortKey:
         return V.compare_values(left, right) == 0
 
 
-def _expr_name(expr):
+def _filter_shape(expr):
+    """A hashable canonical form of a filter expression.
+
+    The literal *values* are part of the key, so ``bucket = 'a'`` and
+    ``bucket = 'b'`` are cached separately.  Only expressions built from
+    literals can be cached safely - anything referring to a column in a
+    non-trivial way yields a key that is never reused.
+    """
+    if expr is None:
+        return ("none",)
+    if isinstance(expr, Literal):
+        return ("lit", repr(expr.value))
+    if isinstance(expr, NullLiteral):
+        return ("null",)
+    if isinstance(expr, ColumnRef):
+        return ("col", expr.name.lower())
+    if isinstance(expr, UnaryOp):
+        return ("unary", expr.op, _filter_shape(expr.operand))
+    if isinstance(expr, BinaryOp):
+        return (
+            "binary",
+            expr.op,
+            _filter_shape(expr.left),
+            _filter_shape(expr.right),
+        )
+    if isinstance(expr, FunctionCall):
+        return ("func", expr.name.upper())
+    if isinstance(expr, InList):
+        return (
+            "in",
+            _filter_shape(expr.expr),
+            tuple(_filter_shape(v) for v in expr.values),
+            expr.negated,
+        )
+    if isinstance(expr, Between):
+        return (
+            "between",
+            _filter_shape(expr.expr),
+            _filter_shape(expr.low),
+            _filter_shape(expr.high),
+            expr.negated,
+        )
+    if isinstance(expr, Like):
+        return ("like", _filter_shape(expr.expr),
+                _filter_shape(expr.pattern), expr.negated)
+    if isinstance(expr, IsNull):
+        return ("isnull", _filter_shape(expr.expr), expr.negated)
+    return ("opaque", id(expr))
     if isinstance(expr, ColumnRef):
         return expr.name
     if isinstance(expr, Literal):

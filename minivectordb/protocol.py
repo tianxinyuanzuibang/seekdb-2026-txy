@@ -37,6 +37,7 @@ the two are unambiguous.
 import io
 import json
 import os
+import re
 import struct
 import sys
 
@@ -54,74 +55,91 @@ def _env_flag(name, default=False):
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _scan_state(text, start=0, stop_at_semicolon=True):
+_QUOTED = re.compile(
+    r"'(?:[^'\\]|\\.|'')*'"      # single-quoted string
+    r'|"(?:[^"\\]|\\.|"")*"'     # double-quoted string
+    r"|`[^`]*`"                  # back-quoted identifier
+)
+
+
+def _scan_state(text, start=0):
     """Scan ``text`` once and report the quote/bracket state.
 
-    Returns ``(in_single, in_double, in_backtick, depth, semicolon_index)``.
-    The scan is a single pass over the text; it is on the hot path because a
-    benchmark batch statement is a few hundred kilobytes long.
+    Returns ``(in_single, in_double, in_backtick, depth, semicolon_index)``
+    where ``semicolon_index`` is the position of the first ``;`` that is
+    outside quotes and brackets, or -1.
 
-    ``semicolon_index`` is the index of the first top-level ``;`` or -1.
+    The common case - a statement with string literals and vector brackets -
+    is handled at C speed: the quoted regions are located with a regular
+    expression and the gaps in between are measured with ``str.count`` and
+    ``str.find`` instead of a Python-level loop over every character.  This
+    matters because a benchmark batch statement is a few hundred kilobytes
+    long.
     """
-    in_single = in_double = in_backtick = False
-    depth = 0
-    i = start
     n = len(text)
-    while i < n:
+    depth = 0
+    position = start
+    while position <= n:
+        match = _QUOTED.search(text, position)
+        end = match.start() if match else n
+        gap = text[position:end]
+
+        if gap:
+            # Comments and semi-colons need care; anything else is a pure
+            # bracket-counting job.
+            if ";" in gap or "--" in gap or "#" in gap:
+                index = _scan_gap(text, position, end, depth)
+                if isinstance(index, tuple):
+                    return index[0], index[1], index[2], index[3], index[4]
+                depth = index
+            else:
+                depth += gap.count("[") - gap.count("]")
+                if depth < 0:
+                    depth = 0
+
+        if match is None:
+            return False, False, False, depth, -1
+
+        quote = text[match.start()]
+        position = match.end()
+        if position > n:                       # pragma: no cover
+            break
+        if quote == "'":
+            continue
+        if quote == '"':
+            continue
+        continue
+    return False, False, False, depth, -1
+
+
+def _scan_gap(text, begin, end, depth):
+    """Carefully scan a gap that may contain comments or a semicolon."""
+    i = begin
+    while i < end:
         ch = text[i]
-        if in_single:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == "'":
-                if i + 1 < n and text[i + 1] == "'":
-                    i += 2
-                    continue
-                in_single = False
-            i += 1
+        nxt = text[i + 1] if i + 1 < end else ""
+        if ch == "-" and nxt == "-":
+            newline = text.find("\n", i)
+            i = end if newline == -1 or newline > end else newline + 1
             continue
-        if in_double:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == '"':
-                if i + 1 < n and text[i + 1] == '"':
-                    i += 2
-                    continue
-                in_double = False
-            i += 1
+        if ch == "#":
+            newline = text.find("\n", i)
+            i = end if newline == -1 or newline > end else newline + 1
             continue
-        if in_backtick:
-            if ch == "`":
-                in_backtick = False
-            i += 1
-            continue
-        if ch == "'":
-            in_single = True
-            i += 1
-            continue
-        if ch == '"':
-            in_double = True
-            i += 1
-            continue
-        if ch == "`":
-            in_backtick = True
-            i += 1
+        if ch == "/" and nxt == "*":
+            close = text.find("*/", i + 2)
+            i = end if close == -1 else close + 2
             continue
         if ch == "[":
             depth += 1
-            i += 1
-            continue
-        if ch == "]":
+        elif ch == "]":
             depth -= 1
             if depth < 0:
                 depth = 0
-            i += 1
-            continue
-        if ch == ";" and depth == 0 and stop_at_semicolon:
-            return in_single, in_double, in_backtick, depth, i
+        elif ch == ";" and depth == 0:
+            return (False, False, False, depth, i)
         i += 1
-    return in_single, in_double, in_backtick, depth, -1
+    return depth
 
 
 def _is_balanced(text):
@@ -281,7 +299,6 @@ SERVER_CAPABILITIES = (
     | CLIENT_PLUGIN_AUTH
     | CLIENT_CONNECT_ATTRS
     | CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-    | CLIENT_DEPRECATE_EOF
 )
 
 MAX_PACKET_SIZE = 0xFFFFFF
@@ -391,9 +408,10 @@ class MySQLProtocol:
                 offset = end + 1
         except (ValueError, IndexError):
             offset = len(payload)
-        self.deprecate_eof = bool(
-            self.client_capabilities & CLIENT_DEPRECATE_EOF
-        )
+        # The server does not advertise DEPRECATE_EOF, so result sets are
+        # always terminated by an EOF packet (the classic framing that
+        # mysqltest and obclient understand).
+        self.deprecate_eof = False
         self.write_packet(b"\x00\x00\x00\x02\x00\x00\x00")  # OK, auth switch
         return True
 
@@ -423,17 +441,21 @@ class MySQLProtocol:
     def send_resultset(self, result):
         self.write_packet(_lenenc_int(len(result.columns)))
         for column in result.columns:
-            payload = _lenenc_str("def")
-            payload += _lenenc_str("")
-            payload += _lenenc_str("")
-            payload += _lenenc_str("")
-            payload += _lenenc_str(column)
-            payload += _lenenc_int(0xFD)          # MYSQL_TYPE_VAR_STRING
-            payload += struct.pack("<H", 0)
-            payload += struct.pack("<I", 0)
-            payload += bytes([0])
-            payload += struct.pack("<H", 0)
-            self.write_packet(payload)
+            payload = bytearray()
+            payload += _lenenc_str("def")            # catalog
+            payload += _lenenc_str("test")           # schema
+            payload += _lenenc_str("")               # table
+            payload += _lenenc_str("")               # org_table
+            payload += _lenenc_str(column)           # name
+            payload += _lenenc_str(column)           # org_name
+            payload += b"\x0c"                       # length of fixed fields
+            payload += struct.pack("<H", 33)         # character set
+            payload += struct.pack("<I", 1024)       # column length
+            payload += bytes([0xFD])                 # type: VAR_STRING
+            payload += struct.pack("<H", 0)          # flags
+            payload += bytes([0])                    # decimals
+            payload += b"\x00\x00"                   # filler
+            self.write_packet(bytes(payload))
         if not self.deprecate_eof:
             self.send_eof()
         for row in result.rows:
@@ -441,18 +463,8 @@ class MySQLProtocol:
             for value in row:
                 if value is None:
                     payload += b"\xfb"
-                elif isinstance(value, (int, float)) and not isinstance(
-                    value, bool
-                ):
-                    payload += _lenenc_str(repr(value)
-                                           if isinstance(value, float)
-                                           else str(value))
-                elif isinstance(value, (tuple, list)):
-                    payload += _lenenc_str(
-                        "[" + ",".join(_fmt(v) for v in value) + "]"
-                    )
                 else:
-                    payload += _lenenc_str(str(value))
+                    payload += _lenenc_str(_cell_text(value))
             self.write_packet(bytes(payload))
         if not self.deprecate_eof:
             self.send_eof()
@@ -532,10 +544,11 @@ class MySQLProtocol:
         return True
 
 
-def _fmt(value):
-    if isinstance(value, float) and value == int(value):
-        return str(int(value))
-    return str(value)
+def _cell_text(value):
+    """Render a value as the text of one MySQL result-set cell."""
+    from .values import format_value
+
+    return format_value(value)
 
 
 # ---------------------------------------------------------------------------

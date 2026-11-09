@@ -319,7 +319,32 @@ def _try_scan_vector(sql: str, i: int):
 
     Returns ``(values, end_index)`` or ``(None, i)`` when the bracket does
     not contain a well formed list of numbers.
+
+    A vector literal in a benchmark batch statement holds 128 numbers, and
+    a batch holds hundreds of them, so the bulk path parses the whole body
+    with ``split`` and ``float`` instead of stepping through it number by
+    number in Python.
     """
+    close = sql.find("]", i + 1)
+    if close < 0:
+        return None, i
+    body = sql[i + 1:close]
+    if not body.strip():
+        return [], close + 1
+    if "[" in body:
+        # Not a flat vector literal - fall back to the slow path so the
+        # error is reported precisely.
+        return _try_scan_vector_slow(sql, i)
+    try:
+        parts = body.split(",")
+        values = [float(part) for part in parts]
+    except ValueError:
+        return _try_scan_vector_slow(sql, i)
+    return values, close + 1
+
+
+def _try_scan_vector_slow(sql: str, i: int):
+    """Character-by-character vector literal scanner (fallback)."""
     n = len(sql)
     j = i + 1
     values = []

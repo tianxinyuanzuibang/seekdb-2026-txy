@@ -38,6 +38,8 @@ COPY minivectordb/ /app/minivectordb/
 COPY README.md /app/README.md
 COPY docs/ /app/docs/
 COPY tests/ /app/tests/
+COPY conversation.json /app/conversation.json
+COPY agent/ /app/agent/
 
 RUN mkdir -p /data \
  && chmod 1777 /data

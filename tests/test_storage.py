@@ -458,6 +458,40 @@ class TestVectorCache(StorageTestCase):
                          [1, 3, 4, 5])
         st.close()
 
+    def test_two_vector_columns_are_cached_separately(self):
+        """Each vector column must get its own cache entry."""
+        st = self.make()
+        columns = [
+            {"name": "id", "type_name": "BIGINT"},
+            {"name": "a", "type_name": "VECTOR", "vector_dim": 2},
+            {"name": "b", "type_name": "VECTOR", "vector_dim": 2},
+        ]
+        st.create_table("t", columns, "id", "a")
+        st.insert_rows("t", [
+            {"id": 1, "a": (1.0, 2.0), "b": (9.0, 9.0)},
+            {"id": 2, "a": (3.0, 4.0), "b": (8.0, 8.0)},
+        ])
+        self.assertEqual(dict(st.scan_column("t", "a")),
+                         {1: (1.0, 2.0), 2: (3.0, 4.0)})
+        self.assertEqual(dict(st.scan_column("t", "b")),
+                         {1: (9.0, 9.0), 2: (8.0, 8.0)})
+        # and again, now from the caches
+        self.assertEqual(dict(st.scan_column("t", "a")),
+                         {1: (1.0, 2.0), 2: (3.0, 4.0)})
+        self.assertEqual(dict(st.scan_column("t", "b")),
+                         {1: (9.0, 9.0), 2: (8.0, 8.0)})
+        self.assertEqual(dict(st.cached_vectors("t", "a")),
+                         {1: (1.0, 2.0), 2: (3.0, 4.0)})
+        self.assertEqual(dict(st.cached_vectors("t", "b")),
+                         {1: (9.0, 9.0), 2: (8.0, 8.0)})
+        # an update of one column must not disturb the other
+        st.update_rows("t", 1, {"b": (5.0, 5.0)})
+        self.assertEqual(dict(st.scan_column("t", "b")),
+                         {1: (5.0, 5.0), 2: (8.0, 8.0)})
+        self.assertEqual(dict(st.scan_column("t", "a")),
+                         {1: (1.0, 2.0), 2: (3.0, 4.0)})
+        st.close()
+
     def test_cache_matches_scan(self):
         st = self.make()
         self.create(st)
