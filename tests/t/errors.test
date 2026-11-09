@@ -1,0 +1,18 @@
+# Error handling: every unsupported or invalid statement must report an
+# explicit error instead of silently doing something else.
+create table e1 (id bigint, name varchar(10), primary key (id));
+insert into e1 values (1, 'a');
+insert into e1 values (1, 'b');
+insert into e1 values (2, 'toolongvalue');
+select nosuchcol from e1;
+select * from nosuchtable;
+create table e1 (id bigint, primary key (id));
+create table e2 (id varchar(10), primary key (id));
+create table e3 (id bigint, a vector(3), b vector(3), primary key (id));
+insert into e1 values (3, 'c', 'extra');
+select * from e1 where id = ;
+update nosuchtable set id = 1;
+delete from nosuchtable;
+drop table nosuchtable;
+insert into e1 values (4, 'd');
+select id from e1 order by id;

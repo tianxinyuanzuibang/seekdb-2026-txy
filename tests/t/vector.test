@@ -1,0 +1,14 @@
+# Vector retrieval: exact top-k, filtered top-k, ordering rules.
+create table v1 (id bigint, tag varchar(16), vec vector(3), primary key (id));
+insert into v1 values (1, 'a', [0,0,0]);
+insert into v1 values (2, 'a', [1,0,0]);
+insert into v1 values (3, 'b', [2,0,0]);
+insert into v1 values (4, 'b', [3,0,0]);
+insert into v1 values (5, 'b', [4,0,0]);
+select id from v1 order by l2_distance(vec, [0,0,0]) limit 2;
+select id, l2_distance(vec, [0,0,0]) as d from v1 order by l2_distance(vec, [0,0,0]) limit 3;
+select id from v1 where tag = 'b' order by l2_distance(vec, [0,0,0]) limit 2;
+select id from v1 where tag = 'b' order by l2_distance(vec, [0,0,0]) limit 10;
+select id from v1 order by l2_distance(vec, [0,0,0]) limit 3 ann;
+select id from v1 order by l2_distance(vec, [0,0,0]) limit 3 exact;
+select id from v1 where tag = 'b' order by l2_distance(vec, [2,0,0]) limit 2 ann;

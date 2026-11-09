@@ -1,0 +1,20 @@
+# Transactions: commit, rollback, visibility, failure isolation.
+create table tx1 (id bigint, v bigint, primary key (id));
+insert into tx1 values (1, 10);
+begin;
+insert into tx1 values (2, 20);
+select id, v from tx1;
+commit;
+select id, v from tx1;
+begin;
+update tx1 set v = 99 where id = 1;
+select id, v from tx1;
+rollback;
+select id, v from tx1;
+begin;
+delete from tx1 where id = 1;
+select id, v from tx1;
+rollback;
+select id, v from tx1;
+insert into tx1 values (3, 30);
+select id, v from tx1;
