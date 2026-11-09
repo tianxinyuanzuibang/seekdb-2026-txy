@@ -85,8 +85,11 @@ def upload_blob(data):
     return payload["sha"]
 
 
-def build_tree(entries, base_tree):
-    """Create a tree from (path, mode, type, sha) entries."""
+def build_tree(entries, base_tree, deleted=None):
+    """Create a tree from (path, mode, type, sha) entries.
+
+    ``deleted`` lists the paths that must be removed from the base tree.
+    """
     payload = {
         "base_tree": base_tree,
         "tree": [
@@ -99,6 +102,13 @@ def build_tree(entries, base_tree):
             for path, mode, type_, sha in entries
         ],
     }
+    for path in deleted or ():
+        payload["tree"].append({
+            "path": path,
+            "mode": "100644",
+            "type": "blob",
+            "sha": None,          # null sha removes the path
+        })
     status, result = api(API + "/git/trees", "POST", payload)
     if status not in (200, 201):
         raise RuntimeError("tree creation failed: {}".format(result))
@@ -141,7 +151,24 @@ def main():
         print("  blob {} {}".format(sha[:8], relative))
 
     # 3. build the tree
-    tree_sha = build_tree(entries, base_tree)
+    #    Deletions have to be expressed explicitly: the tree is created on
+    #    top of the previous commit's tree, so a file that was deleted
+    #    locally would otherwise survive on the remote.
+    deleted = []
+    if parent:
+        status, previous = api(
+            API + "/git/trees/" + base_tree + "?recursive=1"
+        )
+        if status == 200:
+            previous_paths = {
+                entry["path"] for entry in previous.get("tree", [])
+                if entry.get("type") == "blob"
+            }
+            current_paths = {path for path, _mode, _type, _sha in entries}
+            deleted = sorted(previous_paths - current_paths)
+            for path in deleted:
+                print("  delete {}".format(path))
+    tree_sha = build_tree(entries, base_tree, deleted)
     print("tree {}".format(tree_sha))
 
     # 4. create the commit
