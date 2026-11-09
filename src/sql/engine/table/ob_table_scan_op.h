@@ -581,6 +581,10 @@ protected:
                              ObDatum &docid_datum);
   int inner_get_next_spiv_index_row();
   int set_need_check_outrow_lob();
+  // Fails the statement when the session enabled ai_column_strict_read and one
+  // of the AI result columns read by this scan still has unfinished (NULL)
+  // values in the table.
+  int check_ai_column_strict_read();
   void set_real_rescan_cnt(int64_t real_rescan_cnt) { group_rescan_cnt_ = real_rescan_cnt; }
   int64_t get_real_rescan_cnt() { return group_rescan_cnt_; }
 

@@ -446,6 +446,7 @@ public:
   int get_ob_hnsw_ef_search(uint64_t &ob_hnsw_ef_search) const;
   int get_ob_ivf_nprobes(uint64_t &ob_ivf_nprobes) const;
   int get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop_ratio_search) const;
+  int get_ai_column_strict_read(bool &ai_column_strict_read) const;
   int get_sql_quote_show_create(bool &sql_quote_show_create) const;
   common::ObConsistencyLevel get_consistency_level() const { return consistency_level_; };
   bool is_zombie() const { return SESSION_KILLED == get_session_state();}

@@ -139,7 +139,14 @@ ObInnerSQLConnection::ObInnerSQLConnection()
 
 ObInnerSQLConnection::~ObInnerSQLConnection()
 {
-  if (OB_NOT_NULL(inner_session_) && OB_NOT_NULL(inner_session_->get_tx_desc())) {
+  // A connection that borrows the session of the outer statement must not
+  // release the transaction of that session: the outer statement still owns
+  // it and commits or rolls it back itself.  Releasing it here made the outer
+  // statement fail when it ended, because its transaction descriptor was gone.
+  const bool owns_session =
+      (INNER_SQL_SESS_ID != free_session_ctx_.sessid_
+       && ObSQLSessionInfo::INVALID_SESSID != free_session_ctx_.sessid_);
+  if (owns_session && OB_NOT_NULL(inner_session_) && OB_NOT_NULL(inner_session_->get_tx_desc())) {
     if (OB_SUCCESS == share::check_server_runtime_ready()) {
       ::oceanbase::share::server_service<::oceanbase::transaction::ObTransService>()->release_tx(*inner_session_->get_tx_desc());
     }

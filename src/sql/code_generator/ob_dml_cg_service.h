@@ -112,6 +112,9 @@ public:
   int check_is_heap_table(ObLogicalOperator &op,
                           uint64_t ref_table_id,
                           bool &is_heap_table);
+  // True when the table of this DML carries AI columns, which makes the
+  // statement record AI tasks inside its own transaction.
+  bool has_ai_column_in_table(ObLogicalOperator &op, const IndexDMLInfo &index_dml_info);
   int get_column_ref_base_cid(const ObLogicalOperator &op, const ObColumnRefRawExpr *col, uint64_t &base_cid);
 
 private:

@@ -24,6 +24,7 @@
 #include "sql/resolver/ob_resolver_utils.h"
 #include "sql/resolver/ddl/ob_fts_index_builder_util.h"
 #include "share/ob_sql_client_decorator.h"
+#include "share/system_variable/ob_system_variable_init.h"
 
 #define COMMON_SQL              "SELECT * FROM %s"
 #define COMMON_SCHEMA_SQL         "SELECT * FROM %s WHERE 1 = 1"
@@ -1245,6 +1246,35 @@ int ObSchemaServiceSQLImpl::get_all_obj_mysql_privs(ObISQLClient &client,
   return ret;
 }
 
+namespace
+{
+// Adds the schema of the system variable at index `idx` of the hardcoded
+// variable table to `sys_variable_schema`.  It is used for a variable that
+// the store does not know yet, so that the server can start with the default
+// value of the variable.
+int mock_sys_variable_schema(share::schema::ObSysVariableSchema &sys_variable_schema,
+                             int64_t idx)
+{
+  int ret = OB_SUCCESS;
+  share::schema::ObSysVarSchema sysvar_schema;
+  const common::ObString name = share::ObSysVariables::get_name(idx);
+  if (OB_SUCC(ret) && OB_ISNULL(name.ptr())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_SUCC(ret) && OB_FAIL(sysvar_schema.set_name(name))) {
+  } else if (OB_SUCC(ret) && OB_FAIL(sysvar_schema.set_value(share::ObSysVariables::get_value(idx)))) {
+  } else if (OB_SUCC(ret) && OB_FAIL(sysvar_schema.set_min_val(share::ObSysVariables::get_min(idx)))) {
+  } else if (OB_SUCC(ret) && OB_FAIL(sysvar_schema.set_max_val(share::ObSysVariables::get_max(idx)))) {
+  } else if (OB_SUCC(ret) && OB_FAIL(sysvar_schema.set_info(share::ObSysVariables::get_info(idx)))) {
+  } else {
+    sysvar_schema.set_data_type(share::ObSysVariables::get_type(idx));
+    sysvar_schema.set_flags(share::ObSysVariables::get_flags(idx));
+    sysvar_schema.set_schema_version(sys_variable_schema.get_schema_version());
+    ret = sys_variable_schema.add_sysvar_schema(sysvar_schema);
+  }
+  return ret;
+}
+} // namespace
+
 int ObSchemaServiceSQLImpl::get_sys_variable_schema(
     ObISQLClient &sql_client,
     const ObRefreshSchemaStatus &schema_status,
@@ -1298,12 +1328,22 @@ int ObSchemaServiceSQLImpl::get_sys_variable_schema(
 
   if (OB_SUCC(ret)) {
     // To avoid -5044 error, mock missed system variable schema with default value by hardcoded schema.
+    //
+    // A variable that this binary knows but the store does not hold yet is
+    // added with its default value.  That is the case after an upgrade, when
+    // the variable has been introduced by the new binary but the store has not
+    // been written yet.
     for (int64_t i = 0; OB_SUCC(ret) && i < ObSysVariables::get_amount(); i++) {
       ObSysVarClassType sys_var_id = ObSysVariables::get_sys_var_id(i);
       const ObSysVarSchema *sys_var = NULL;
-      if (OB_FAIL(sys_variable_schema.get_sysvar_schema(sys_var_id, sys_var))) {
-      } else if (OB_ISNULL(sys_var)) {
-        ret = OB_ERR_UNEXPECTED;
+      int get_ret = sys_variable_schema.get_sysvar_schema(sys_var_id, sys_var);
+      if (OB_ERR_SYS_VARIABLE_UNKNOWN == get_ret || (OB_SUCC(get_ret) && OB_ISNULL(sys_var))) {
+        if (OB_FAIL(mock_sys_variable_schema(sys_variable_schema, i))) {
+          SHARE_SCHEMA_LOG(WARN, "fail to mock the missed system variable schema",
+                            K(ret), "sys_var_id", sys_var_id);
+        }
+      } else if (OB_FAIL(get_ret)) {
+        ret = get_ret;
       } else {
         // sys_var exist, no need to deal with it
       }

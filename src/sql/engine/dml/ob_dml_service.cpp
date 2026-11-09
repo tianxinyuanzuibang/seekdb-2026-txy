@@ -34,6 +34,7 @@
 #include "sql/engine/ob_batch_rows.h"
 #include "sql/engine/ob_physical_plan.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "sql/engine/dml/ob_ai_column_dml.h"
 namespace oceanbase
 {
 using namespace common;
@@ -629,6 +630,7 @@ int ObDMLService::process_insert_row(const ObInsCtDef &ins_ctdef,
                                       ins_ctdef.is_single_value_,
                                       dml_op))) {
     } else if (OB_FAIL(check_filter_row(ins_ctdef, dml_op.get_eval_ctx(), is_skipped))) {
+    } else if (OB_FAIL(ObAiColumnDml::reset_ai_columns(ins_ctdef, eval_ctx))) {
     }
 
   }
@@ -814,6 +816,7 @@ int ObDMLService::process_update_row(const ObUpdCtDef &upd_ctdef,
         } else {
           ret = OB_ERR_CHECK_CONSTRAINT_VIOLATED;
         }
+      } else if (OB_FAIL(ObAiColumnDml::reset_ai_columns(upd_ctdef, dml_op.get_eval_ctx()))) {
       }
     }
   } else {
@@ -2179,6 +2182,18 @@ int ObDMLService::handle_after_processing_multi_row(ObDMLModifyRowsList *dml_mod
           } else if (OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
           }
         }
+        // Invalidate the AI columns of the row and record their tasks inside
+        // the transaction of this statement.
+        if (OB_SUCC(ret) && op.has_ai_column(dml_ctdef)) {
+          if (t_insert == dml_event) {
+            if (OB_FAIL(ObAiColumnDml::handle_inserted_row(dml_ctdef, dml_rtdef, op))) {
+            }
+          } else if (t_update == dml_event) {
+            if (OB_FAIL(ObAiColumnDml::handle_updated_row(dml_ctdef, dml_rtdef, op))) {
+            }
+          } else if (OB_FAIL(ObAiColumnDml::handle_deleted_row(dml_ctdef, dml_rtdef, op))) {
+          }
+        }
       }
     }
 
@@ -2219,6 +2234,19 @@ int ObDMLService::handle_after_processing_single_row(ObDMLModifyRowNode &modify_
     }
     if (OB_SUCC(ret) && OB_FAIL(TriggerHandle::do_handle_after_row(op, dml_ctdef.trig_ctdef_, dml_rtdef.trig_rtdef_, dml_event))) {
     }
+    // The AI columns of the row have to be invalidated and their tasks
+    // recorded in the transaction of this statement, so that a rollback also
+    // discards the tasks and no request is sent for a row that never existed.
+    if (OB_SUCC(ret) && op.has_ai_column(dml_ctdef)) {
+      if (t_insert == dml_event) {
+        if (OB_FAIL(ObAiColumnDml::handle_inserted_row(dml_ctdef, dml_rtdef, op))) {
+        }
+      } else if (t_update == dml_event) {
+        if (OB_FAIL(ObAiColumnDml::handle_updated_row(dml_ctdef, dml_rtdef, op))) {
+        }
+      } else if (OB_FAIL(ObAiColumnDml::handle_deleted_row(dml_ctdef, dml_rtdef, op))) {
+      }
+    }
   }
   return ret;
 }
@@ -2246,10 +2274,6 @@ int ObDMLService::handle_after_row_processing(ObTableModifyOp *op,
   if (OB_ISNULL(op) || OB_ISNULL(dml_modify_rows)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (1 > dml_modify_rows->size()) {
-    // after row processing list is empty, nothing to do
-    #ifndef NDEBUG
-      LOG_INFO("No row need to perform foreign key check or after row trigger");
-    #endif
   } else if (op->execute_single_row_) {
     ret = handle_after_processing_single_row(dml_modify_rows);
   } else {

@@ -93,7 +93,8 @@ public:
       uint64_t is_update_pk_                    : 1;
       uint64_t is_vec_hnsw_index_vid_opt_       : 1;  // hnsw index vid opt for tables without pk
       uint64_t skip_check_schema_version_       : 1;  // skip storage schema_version validation for special internal writes
-      uint64_t reserved_                        : 51; //add new flag before reserved_
+      uint64_t has_ai_column_                    : 1;  // the written table has at least one AI column
+      uint64_t reserved_                        : 49; //add new flag before reserved_
     };
   };
 protected:

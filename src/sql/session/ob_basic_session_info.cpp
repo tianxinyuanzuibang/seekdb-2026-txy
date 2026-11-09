@@ -3033,6 +3033,11 @@ int ObBasicSessionInfo::get_ob_sparse_drop_ratio_search(uint64_t &ob_sparse_drop
 {
   return get_uint64_sys_var(SYS_VAR_OB_SPARSE_DROP_RATIO_SEARCH, ob_sparse_drop_ratio_search);
 }
+
+int ObBasicSessionInfo::get_ai_column_strict_read(bool &ai_column_strict_read) const
+{
+  return get_bool_sys_var(SYS_VAR_AI_COLUMN_STRICT_READ, ai_column_strict_read);
+}
 ////////////////////////////////////////////////////////////////
 int ObBasicSessionInfo::replace_user_variables(const ObSessionValMap &user_var_map)
 {

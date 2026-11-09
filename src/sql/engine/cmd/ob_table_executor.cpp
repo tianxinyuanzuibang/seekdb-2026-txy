@@ -15,10 +15,21 @@
  */
 
 #define USING_LOG_PREFIX SQL_ENG
+#include <ctype.h>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
 #include "config_bridge.h"
+#include "common/mysqlclient/ob_mysql_proxy.h"
+#include "common/mysqlclient/ob_mysql_transaction.h"
 #include "common/ob_timeout_ctx.h"
 #include "lib/stat/ob_diagnostic_info_guard.h"
+#include "share/inner_table/ob_inner_table_schema_constants.h"
 #include "share/ob_server_struct.h"
+#include "share/schema/ob_ai_column_spec.h"
+#include "share/schema/ob_schema_getter_guard.h"
 #include "sql/engine/cmd/ob_table_executor.h"
 #include "query/command/ob_root_command_service.h"
 #include "query/command/ob_root_service_serialization.h"
@@ -51,6 +62,674 @@ using namespace share::schema;
 using namespace observer;
 namespace sql
 {
+
+namespace
+{
+
+// ---------------------------------------------------------------------------
+// ALTER TABLE ... RETRY AI COLUMN
+//
+// The rewrite stage (sql/parser/ob_ai_column_rewriter.cpp) recognizes the
+// command and turns it into a harmless DDL statement that adds a marker
+// column:
+//
+//   ALTER TABLE [db.]t ADD COLUMN `__ai_retry_marker` LONGTEXT NULL
+//     COMMENT 'v1:...'
+//
+// The request itself travels in the comment of that column:
+//
+//   v1:<hex action \x1f errno \x1f db \x1f table \x1f column \x1f predicate
+//          \x1f error message>
+//
+// The statement is handled here, before the DDL is sent, because a retry is
+// not a schema change: it invalidates the results of the selected rows and
+// records a task for every one of them, exactly like a write of the row does.
+// Errors are reported here too, since this is the stage whose thread sends the
+// error packet of the DDL, so only here the user message reaches the client.
+//
+// Keep the payload layout in sync with the rewriter.
+const char *AI_RETRY_MARKER_COLUMN = "__ai_retry_marker";
+const char *AI_RETRY_PAYLOAD_PREFIX = "v1:";
+const char *AI_RETRY_ACTION_RETRY = "retry";
+const char *AI_RETRY_ACTION_ERROR = "error";
+const char *AI_RETRY_NOT_AI_COLUMN_MSG =
+    "retrying a column that is not an AI column not supported";
+
+struct AiRetryPayload
+{
+  std::string action_;
+  int64_t errno_;
+  std::string database_;
+  std::string table_;
+  std::string column_;
+  std::string predicate_;
+  std::string message_;
+
+  AiRetryPayload() : errno_(0) {}
+};
+
+int ai_retry_hex_value(char c, int &value)
+{
+  int ret = OB_SUCCESS;
+  value = -1;
+  if (c >= '0' && c <= '9') {
+    value = c - '0';
+  } else if (c >= 'a' && c <= 'f') {
+    value = c - 'a' + 10;
+  } else if (c >= 'A' && c <= 'F') {
+    value = c - 'A' + 10;
+  } else {
+    ret = OB_INVALID_ARGUMENT;
+  }
+  return ret;
+}
+
+bool ai_retry_is_word_char(char c)
+{
+  return isalnum(static_cast<unsigned char>(c)) || '_' == c || '$' == c;
+}
+
+std::string ai_retry_lower_ascii(const std::string &in)
+{
+  std::string out = in;
+  for (size_t i = 0; i < out.size(); ++i) {
+    out[i] = static_cast<char>(tolower(static_cast<unsigned char>(out[i])));
+  }
+  return out;
+}
+
+bool ai_retry_decode_payload(const std::string &text, AiRetryPayload &payload)
+{
+  bool ok = false;
+  const std::string prefix(AI_RETRY_PAYLOAD_PREFIX);
+  if (text.size() > prefix.size()
+      && 0 == text.compare(0, prefix.size(), prefix)
+      && 0 == ((text.size() - prefix.size()) % 2)) {
+    std::string raw;
+    bool bad = false;
+    raw.reserve((text.size() - prefix.size()) / 2);
+    for (size_t i = prefix.size(); !bad && i + 1 < text.size(); i += 2) {
+      int hi = 0;
+      int lo = 0;
+      if (OB_SUCCESS != ai_retry_hex_value(text[i], hi)
+          || OB_SUCCESS != ai_retry_hex_value(text[i + 1], lo)) {
+        bad = true;
+      } else {
+        raw.push_back(static_cast<char>((hi << 4) | lo));
+      }
+    }
+    if (!bad) {
+      std::vector<std::string> parts;
+      std::string field;
+      for (size_t i = 0; i < raw.size(); ++i) {
+        if ('\x1f' == raw[i]) {
+          parts.push_back(field);
+          field.clear();
+        } else {
+          field.push_back(raw[i]);
+        }
+      }
+      parts.push_back(field);
+      if (parts.size() >= 7) {
+        payload.action_ = parts[0];
+        payload.errno_ = atol(parts[1].c_str());
+        payload.database_ = parts[2];
+        payload.table_ = parts[3];
+        payload.column_ = parts[4];
+        payload.predicate_ = parts[5];
+        payload.message_ = parts[6];
+        ok = true;
+      }
+    }
+  }
+  return ok;
+}
+
+// Finds the marker column of a rewritten ALTER TABLE ... RETRY AI COLUMN.
+bool ai_retry_find_marker(const AlterTableSchema &schema, std::string &payload_text)
+{
+  bool found = false;
+  for (ObTableSchema::const_column_iterator iter = schema.column_begin();
+       !found && iter != schema.column_end(); ++iter) {
+    if (OB_ISNULL(iter) || OB_ISNULL(*iter)) {
+      continue;
+    }
+    const ObColumnSchemaV2 &column = **iter;
+    const char *column_name = column.get_column_name();
+    if (OB_NOT_NULL(column_name) && 0 == strcmp(column_name, AI_RETRY_MARKER_COLUMN)) {
+      const ObString &comment = column.get_comment_str();
+      if (comment.empty() || OB_ISNULL(comment.ptr())) {
+        payload_text.clear();
+      } else {
+        payload_text.assign(comment.ptr(), comment.length());
+      }
+      found = true;
+    }
+  }
+  return found;
+}
+
+std::string ai_retry_quote_identifier(const std::string &name)
+{
+  std::string out;
+  out.reserve(name.size() + 2);
+  out.push_back('`');
+  for (size_t i = 0; i < name.size(); ++i) {
+    if ('`' == name[i]) {
+      out.push_back('`');  // a backtick is escaped by writing it twice
+    }
+    out.push_back(name[i]);
+  }
+  out.push_back('`');
+  return out;
+}
+
+void ai_retry_append_sql_literal(std::string &out, const std::string &text)
+{
+  out.push_back('\'');
+  for (size_t i = 0; i < text.size(); ++i) {
+    if ('\'' == text[i] || '\\' == text[i]) {
+      out.push_back(text[i]);
+    }
+    out.push_back(text[i]);
+  }
+  out.push_back('\'');
+}
+
+// Builds the SQL expression that produces the rowkey predicate text of a row,
+// which is the text the DML layer stores in __all_ai_column_task.  For a
+// single column key it is `id` = 2 (a string key is quoted by QUOTE), and the
+// columns of a composite key are joined with " AND ".
+int ai_retry_build_rowkey_expression(const ObTableSchema &table_schema,
+                                     std::string &expression)
+{
+  int ret = OB_SUCCESS;
+  const ObRowkeyInfo &rowkey_info = table_schema.get_rowkey_info();
+  const int64_t rowkey_count = rowkey_info.get_size();
+  expression.clear();
+  if (rowkey_count <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the table of an ai column retry has no rowkey", K(ret), K(rowkey_count));
+  } else {
+    expression.append("CONCAT(");
+    for (int64_t i = 0; OB_SUCC(ret) && i < rowkey_count; ++i) {
+      uint64_t column_id = OB_INVALID_ID;
+      const ObColumnSchemaV2 *column_schema = NULL;
+      if (OB_FAIL(rowkey_info.get_column_id(i, column_id))) {
+      } else if (OB_ISNULL(column_schema = table_schema.get_column_schema(column_id))) {
+        ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("the rowkey column of the table is missing", K(ret), K(column_id));
+      } else {
+        const char *column_name = column_schema->get_column_name();
+        if (OB_ISNULL(column_name)) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          const std::string name(column_name);
+          const std::string quoted = ai_retry_quote_identifier(name);
+          std::string text;
+          if (i > 0) {
+            text.append(" AND ");
+          }
+          text.push_back('`');
+          text.append(name);
+          text.append("` = ");
+          if (i > 0) {
+            expression.append(", ");
+          }
+          ai_retry_append_sql_literal(expression, text);
+          expression.append(", ");
+          if (ob_is_string_type(column_schema->get_data_type())) {
+            expression.append("QUOTE(");
+            expression.append(quoted);
+            expression.append(")");
+          } else {
+            expression.append(quoted);
+          }
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      expression.append(")");
+    }
+  }
+  return ret;
+}
+
+// The expression that replaces `status = '<state>'` of the WHERE clause of a
+// retry.  STATUS is a pseudo column of the command only: the physical column
+// of the table is addressed with backticks and is left untouched.
+// Rewrites the WHERE clause of a retry.  The bare identifier `status` is a
+// pseudo column of the command: it denotes the state of the AI column of the
+// row.  A backtick quoted `status` is the ordinary column of the table and is
+// left untouched.
+//
+// The state cannot be read by a condition of the statement that writes the
+// tasks, because that statement writes the table the state is read from.  The
+// rows are therefore selected first, and the statement that writes the tasks
+// works on the list of the selected rows.
+int ai_retry_rewrite_predicate(const std::string &predicate,
+                               const std::string &column_sql,
+                               std::string &state,
+                               std::string &out)
+{
+  int ret = OB_SUCCESS;
+  out.clear();
+  out.reserve(predicate.size() + 256);
+  state.clear();
+  size_t copied = 0;
+  size_t i = 0;
+  while (OB_SUCC(ret) && i < predicate.size()) {
+    const char c = predicate[i];
+    if ('\'' == c || '"' == c || '`' == c) {
+      size_t end = i + 1;
+      bool closed = false;
+      while (end < predicate.size()) {
+        if ('`' != c && '\\' == predicate[end]) {
+          end += 2;
+          continue;
+        }
+        if (predicate[end] == c) {
+          if (end + 1 < predicate.size() && predicate[end + 1] == c) {
+            end += 2;  // an escaped quote is written twice
+            continue;
+          }
+          closed = true;
+          break;
+        }
+        ++end;
+      }
+      if (!closed) {
+        // A not well formed predicate: leave it untouched and let the
+        // statements that run it report the syntax error.
+        out = predicate;
+        return OB_SUCCESS;
+      }
+      i = end + 1;
+      continue;
+    }
+    if (isalpha(static_cast<unsigned char>(c)) || '_' == c) {
+      size_t end = i;
+      while (end < predicate.size() && ai_retry_is_word_char(predicate[end])) {
+        ++end;
+      }
+      const std::string token = predicate.substr(i, end - i);
+      const bool qualified = (i > 0 && '.' == predicate[i - 1])
+                             || (end < predicate.size() && '.' == predicate[end]);
+      if (!qualified && "status" == ai_retry_lower_ascii(token)) {
+        size_t equal = end;
+        while (equal < predicate.size()
+               && isspace(static_cast<unsigned char>(predicate[equal]))) {
+          ++equal;
+        }
+        if (equal < predicate.size() && '=' == predicate[equal]) {
+          size_t value_begin = equal + 1;
+          while (value_begin < predicate.size()
+                 && isspace(static_cast<unsigned char>(predicate[value_begin]))) {
+            ++value_begin;
+          }
+          if (value_begin < predicate.size() && '\'' == predicate[value_begin]) {
+            size_t value_end = value_begin + 1;
+            bool closed = false;
+            while (value_end < predicate.size()) {
+              if ('\\' == predicate[value_end]) {
+                value_end += 2;
+                continue;
+              }
+              if ('\'' == predicate[value_end]) {
+                if (value_end + 1 < predicate.size()
+                    && '\'' == predicate[value_end + 1]) {
+                  value_end += 2;
+                  continue;
+                }
+                closed = true;
+                break;
+              }
+              ++value_end;
+            }
+            if (closed) {
+              const std::string value = ai_retry_lower_ascii(
+                  predicate.substr(value_begin + 1, value_end - value_begin - 1));
+              if ("ready" == value || "failed" == value || "pending" == value) {
+                state = value;
+                // The condition on the state becomes a condition on the value
+                // of the column; the state itself is resolved by the
+                // statement that selects the rows.
+                out.append(predicate, copied, i - copied);
+                out.append("(" + column_sql + " IS ");
+                out.append("ready" == state ? "NOT NULL" : "NULL");
+                out.append(")");
+                copied = value_end + 1;
+                i = value_end + 1;
+                continue;
+              }
+            }
+          }
+        }
+      }
+      i = end;
+      continue;
+    }
+    ++i;
+  }
+  out.append(predicate, copied, std::string::npos);
+  return ret;
+}
+
+
+int ai_retry_execute_sql(ObSqlString &replace_sql, ObSqlString &update_sql)
+{
+  int ret = OB_SUCCESS;
+  ObMySQLTransaction trans;
+  int64_t affected_rows = 0;
+  if (OB_ISNULL(GCTX.sql_proxy_)) {
+    ret = OB_NOT_INIT;
+    LOG_WARN("the sql proxy of the ai column retry is not available", K(ret));
+  } else if (OB_FAIL(trans.start(GCTX.sql_proxy_, false))) {
+    LOG_WARN("cannot start the transaction of an ai column retry", K(ret));
+  } else {
+    int write_ret = trans.write(replace_sql.ptr(), affected_rows);
+    if (OB_SUCCESS == write_ret) {
+      write_ret = trans.write(update_sql.ptr(), affected_rows);
+    }
+    const int end_ret = trans.end(OB_SUCCESS == write_ret);
+    if (OB_SUCCESS != write_ret) {
+      ret = write_ret;
+      LOG_WARN("cannot execute an ai column retry", K(ret), K(replace_sql));
+    } else if (OB_SUCCESS != end_ret) {
+      ret = end_ret;
+      LOG_WARN("cannot commit an ai column retry", K(ret));
+    }
+  }
+  return ret;
+}
+
+// Invalidates the results of the rows selected by the retry and records their
+// tasks.  The tasks are recorded before the results are reset, so that the
+// predicate of the retry ("status = 'READY'" reads the result column) is still
+// evaluated on the state the user asked about.  Both statements run in one
+// transaction, so the background worker never sees a task of a result that is
+// still valid.
+// The rows whose state matches the predicate are resolved before the tasks are
+// written.  The state of a row is read from the task table, and the statement
+// that writes the tasks may not read the table it writes, so the rows are
+// selected first and the statement that writes the tasks works on that list.
+int ai_retry_select_rows(const std::string &table_sql,
+                         const std::string &column_sql,
+                         const std::string &rowkey_expression,
+                         const std::string &predicate,
+                         const std::string &state,
+                         const uint64_t table_id,
+                         const uint64_t column_id,
+                         std::string &row_list)
+{
+  int ret = OB_SUCCESS;
+  row_list.clear();
+  ObSqlString sql;
+  ObCommonSqlProxy proxy;
+  if ("ready" == state) {
+    // A row is ready when it holds a result.
+    if (OB_FAIL(sql.assign_fmt("SELECT %s FROM %s WHERE %s",
+                               rowkey_expression.c_str(), table_sql.c_str(),
+                               predicate.c_str()))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  } else {
+    // A row is failed when it holds no result and no task is pending for it,
+    // and pending when a task is pending for it.
+    const char *exists = ("failed" == state) ? "NOT EXISTS" : "EXISTS";
+    if (OB_FAIL(sql.assign_fmt(
+            "SELECT %s FROM %s WHERE %s IS NULL AND %s ("
+            "SELECT 1 FROM oceanbase.%s tk WHERE tk.table_id = %lu "
+            "AND tk.column_id = %lu AND tk.rowkey_predicate = %s)",
+            rowkey_expression.c_str(), table_sql.c_str(), column_sql.c_str(),
+            exists, OB_ALL_AI_COLUMN_TASK_TNAME,
+            static_cast<unsigned long>(table_id),
+            static_cast<unsigned long>(column_id), rowkey_expression.c_str()))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
+  }
+  if (OB_SUCC(ret)) {
+    if (OB_FAIL(proxy.init(false))) {
+    } else {
+      ObMySQLProxy::MySQLResult result_holder;
+      if (OB_FAIL(proxy.read(result_holder, sql.ptr()))) {
+      } else if (OB_ISNULL(result_holder.get_result())) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        sqlclient::ObMySQLResult *result = result_holder.get_result();
+        int next_ret = OB_SUCCESS;
+        std::string list;
+        while (OB_SUCC(ret) && OB_SUCCESS == (next_ret = result->next())) {
+          common::ObString value;
+          if (OB_FAIL(result->get_varchar(static_cast<int64_t>(0), value))) {
+            ret = OB_ERR_UNEXPECTED;
+            break;
+          }
+          if (!list.empty()) {
+            list += ",";
+          }
+          list += std::string(value.ptr(), value.length());
+        }
+        if (OB_ITER_END == next_ret) {
+          row_list = list;
+        } else if (OB_SUCCESS != next_ret) {
+          ret = next_ret;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ai_retry_invalidate_and_enqueue(const ObTableSchema &table_schema,
+                                    const ObDatabaseSchema &database_schema,
+                                    const AiRetryPayload &payload,
+                                    const ObColumnSchemaV2 &result_column)
+{
+  int ret = OB_SUCCESS;
+  const uint64_t table_id = table_schema.get_table_id();
+  const uint64_t column_id = result_column.get_column_id();
+  const std::string column_sql = ai_retry_quote_identifier(payload.column_);
+  std::string predicate = payload.predicate_;
+  std::string rowkey_expression;
+  std::string rewritten_predicate;
+  std::string state;
+  std::string database_name;
+  std::string table_name;
+  if (predicate.empty()) {
+    // A retry without a WHERE clause selects every row.
+    predicate = "1 = 1";
+  }
+  const ObString database(database_schema.get_database_name_str());
+  const ObString table(table_schema.get_table_name_str());
+  if (OB_UNLIKELY(database.empty()) || OB_UNLIKELY(table.empty())) {
+    ret = OB_ERR_UNEXPECTED;
+    LOG_WARN("the table of an ai column retry has no name", K(ret), K(table_id));
+  } else {
+    database_name.assign(database.ptr(), database.length());
+    table_name.assign(table.ptr(), table.length());
+    if (OB_FAIL(ai_retry_build_rowkey_expression(table_schema, rowkey_expression))) {
+    } else if (OB_FAIL(ai_retry_rewrite_predicate(predicate, column_sql, state,
+                                                  rewritten_predicate))) {
+    } else {
+      const std::string table_sql =
+          ai_retry_quote_identifier(database_name) + "."
+          + ai_retry_quote_identifier(table_name);
+      // The rows of the retry are resolved first.  The state of a row is read
+      // from the task table, and the statement that writes the tasks may not
+      // read the table it writes, so the rows are selected while the task
+      // table still holds the old state.
+      std::string row_list;
+      if (OB_FAIL(ai_retry_select_rows(table_sql, column_sql, rowkey_expression,
+                                       rewritten_predicate, state, table_id,
+                                       column_id, row_list))) {
+        LOG_WARN("cannot select the rows of an ai column retry", K(ret));
+      } else if (row_list.empty()) {
+        // No row matches the condition of the retry, so nothing is done.
+      } else {
+        ObSqlString replace_sql;
+        ObSqlString update_sql;
+        const std::string row_condition = rowkey_expression + " IN (" + row_list + ")";
+        if (OB_FAIL(replace_sql.assign_fmt(
+                "REPLACE INTO oceanbase.%s (table_id, column_id, request_id, "
+                "rowkey_hash, rowkey_predicate, state, retry_count, eligible_ts, "
+                "last_error) "
+                "SELECT %lu, %lu, CONCAT('retry-%lu-%lu-', SUBSTR(MD5(%s), 1, 24)), "
+                "(CRC32(%s) %% 1000000007), %s, 0, 0, NOW(6), '' "
+                "FROM %s WHERE %s",
+                OB_ALL_AI_COLUMN_TASK_TNAME,
+                static_cast<unsigned long>(table_id),
+                static_cast<unsigned long>(column_id),
+                static_cast<unsigned long>(table_id),
+                static_cast<unsigned long>(column_id),
+                rowkey_expression.c_str(),
+                rowkey_expression.c_str(),
+                rowkey_expression.c_str(),
+                table_sql.c_str(),
+                row_condition.c_str()))) {
+          LOG_WARN("cannot build the task statement of an ai column retry", K(ret));
+        } else if (OB_FAIL(update_sql.assign_fmt("UPDATE %s SET %s = NULL WHERE %s",
+                                                 table_sql.c_str(),
+                                                 column_sql.c_str(),
+                                                 row_condition.c_str()))) {
+          LOG_WARN("cannot build the update statement of an ai column retry", K(ret));
+        } else if (OB_FAIL(ai_retry_execute_sql(replace_sql, update_sql))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ai_retry_run_checked(const ObTableSchema &table_schema,
+                         const ObDatabaseSchema &database_schema,
+                         const AiRetryPayload &payload)
+{
+  int ret = OB_SUCCESS;
+  const ObColumnSchemaV2 *result_column = NULL;
+  const ObColumnSchemaV2 *spec_column = NULL;
+  const std::string spec_name = ObAiColumnSpec::spec_column_name(payload.column_);
+  if (payload.column_.empty()) {
+    ret = OB_NOT_SUPPORTED;
+    FORWARD_USER_ERROR_MSG(OB_NOT_SUPPORTED, "%s", AI_RETRY_NOT_AI_COLUMN_MSG);
+  } else if (OB_ISNULL(result_column = table_schema.get_column_schema(payload.column_.c_str()))
+             || OB_ISNULL(spec_column = table_schema.get_column_schema(spec_name.c_str()))) {
+    // The column is an ordinary column: the hidden column that carries the
+    // generation rule is missing.  A retry only makes sense for a result
+    // column, its value is what the retry produces again.
+    ret = OB_NOT_SUPPORTED;
+    FORWARD_USER_ERROR_MSG(OB_NOT_SUPPORTED, "%s", AI_RETRY_NOT_AI_COLUMN_MSG);
+    LOG_WARN("the retried column is not an ai column", K(ret),
+             "column_name", payload.column_.c_str());
+  } else if (OB_FAIL(ai_retry_invalidate_and_enqueue(table_schema, database_schema,
+                                                     payload, *result_column))) {
+  }
+  return ret;
+}
+
+int ai_retry_get_table_schema(ObSchemaGetterGuard &guard,
+                              const uint64_t table_id,
+                              const AiRetryPayload &payload,
+                              const ObSQLSessionInfo &session,
+                              const ObTableSchema *&table_schema)
+{
+  int ret = OB_SUCCESS;
+  table_schema = NULL;
+  if (OB_INVALID_ID != table_id) {
+    if (OB_FAIL(guard.get_table_schema(table_id, table_schema))) {
+      LOG_WARN("cannot read the table of an ai column retry", K(ret), K(table_id));
+    }
+  } else {
+    std::string database_name = payload.database_;
+    if (database_name.empty()) {
+      const ObString session_database = session.get_database_name();
+      if (!session_database.empty()) {
+        database_name.assign(session_database.ptr(), session_database.length());
+      }
+    }
+    if (database_name.empty() || payload.table_.empty()) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      const ObString database(static_cast<int64_t>(database_name.size()),
+                              database_name.c_str());
+      const ObString table(static_cast<int64_t>(payload.table_.size()),
+                           payload.table_.c_str());
+      if (OB_FAIL(guard.get_table_schema(database, table, false, table_schema))) {
+        LOG_WARN("cannot read the table of an ai column retry", K(ret));
+      }
+    }
+  }
+  return ret;
+}
+
+int ai_retry_run(const AiRetryPayload &payload,
+                 const uint64_t table_id,
+                 const ObSQLSessionInfo &session)
+{
+  int ret = OB_SUCCESS;
+  ObSchemaGetterGuard guard;
+  const ObTableSchema *table_schema = NULL;
+  const ObDatabaseSchema *database_schema = NULL;
+  if (OB_ISNULL(GCTX.schema_service_)) {
+    ret = OB_NOT_INIT;
+  } else if (OB_FAIL(GCTX.schema_service_->get_runtime_schema_guard(guard))) {
+    LOG_WARN("cannot get the schema guard of an ai column retry", K(ret));
+  } else if (OB_FAIL(ai_retry_get_table_schema(guard, table_id, payload, session,
+                                               table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_TABLE_NOT_EXIST;
+    LOG_WARN("the table of an ai column retry does not exist", K(ret), K(table_id));
+  } else if (OB_FAIL(guard.get_database_schema(table_schema->get_database_id(),
+                                               database_schema))) {
+    LOG_WARN("cannot read the database of an ai column retry", K(ret));
+  } else if (OB_ISNULL(database_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ai_retry_run_checked(*table_schema, *database_schema, payload))) {
+  }
+  return ret;
+}
+
+// Handles the marker column of a rewritten ALTER TABLE ... RETRY AI COLUMN.
+// `handled` tells the caller that the statement was a retry, so no DDL may be
+// applied even when the retry itself failed.
+int ai_retry_execute_if_needed(obcall::ObAlterTableArg &arg,
+                               const ObSQLSessionInfo &session,
+                               bool &handled)
+{
+  int ret = OB_SUCCESS;
+  handled = false;
+  std::string payload_text;
+  if (!ai_retry_find_marker(arg.alter_table_schema_, payload_text)) {
+    // An ordinary ALTER TABLE statement.
+  } else {
+    handled = true;
+    AiRetryPayload payload;
+    if (!ai_retry_decode_payload(payload_text, payload)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("cannot decode the marker of an ai column retry", K(ret));
+    } else if (0 == payload.action_.compare(AI_RETRY_ACTION_ERROR)) {
+      ret = static_cast<int>(payload.errno_);
+      if (OB_SUCCESS == ret) {
+        ret = OB_NOT_SUPPORTED;
+      }
+      if (!payload.message_.empty()) {
+        FORWARD_USER_ERROR_MSG(ret, "%s", payload.message_.c_str());
+      }
+      LOG_WARN("the ai column retry is rejected", K(ret),
+               "message", payload.message_.c_str());
+    } else if (0 != payload.action_.compare(AI_RETRY_ACTION_RETRY)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("unknown action of an ai column retry", K(ret),
+               "action", payload.action_.c_str());
+    } else if (OB_FAIL(ai_retry_run(payload, arg.alter_table_schema_.get_table_id(),
+                                    session))) {
+      LOG_WARN("cannot execute an ai column retry", K(ret));
+    }
+  }
+  return ret;
+}
+
+} // namespace
 
 ObCreateTableExecutor::ObCreateTableExecutor()
 {
@@ -779,6 +1458,7 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
     bool need_modify_fk_validate = false;
     bool need_check = false;
     bool need_modify_notnull_validate = false;
+    bool ai_retry_handled = false;
     ObArenaAllocator allocator(ObModIds::OB_SQL_EXECUTOR);
     if (OB_FAIL(stmt.get_first_stmt(first_stmt))) {
     } else {
@@ -790,6 +1470,11 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
       } else if (FALSE_IT(alter_table_arg.sql_mode_ = my_session->get_sql_mode())) {
         // do nothing
       } else if (FALSE_IT(alter_table_arg.parallelism_ = stmt.get_parallelism())) {
+      } else if (OB_FAIL(ai_retry_execute_if_needed(alter_table_arg, *my_session,
+                                                    ai_retry_handled))) {
+      } else if (ai_retry_handled) {
+        // The retry did its work (or reported its own user error); the marker
+        // statement must never be applied as a schema change.
       } else if (OB_FAIL(check_alter_partition(ctx, stmt, alter_table_arg))) {
       } else if (OB_FAIL(check_alter_part_key(ctx, alter_table_arg))) {
       } else if (OB_FAIL(set_index_arg_list(ctx, stmt))) {

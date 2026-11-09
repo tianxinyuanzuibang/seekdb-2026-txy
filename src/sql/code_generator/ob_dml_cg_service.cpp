@@ -24,6 +24,7 @@
 #include "sql/optimizer/ob_log_update.h"
 #include "sql/das/ob_domain_id.h"
 #include "query/vector/ob_vector_index_util.h"
+#include "share/schema/ob_ai_column_runtime.h"
 
 namespace oceanbase
 {
@@ -2086,6 +2087,24 @@ int ObDmlCgService::check_is_heap_table(ObLogicalOperator &op,
   return ret;
 }
 
+// True when the table of this DML has at least one AI column.  Such a
+// statement has to record AI tasks inside its own transaction.
+bool ObDmlCgService::has_ai_column_in_table(ObLogicalOperator &op,
+                                            const IndexDMLInfo &index_dml_info)
+{
+  bool found = false;
+  ObLogPlan *log_plan = op.get_plan();
+  ObSchemaGetterGuard *schema_guard = NULL;
+  const ObTableSchema *table_schema = NULL;
+  if (OB_NOT_NULL(log_plan)
+      && OB_NOT_NULL(schema_guard = log_plan->get_optimizer_context().get_schema_guard())
+      && OB_SUCCESS == schema_guard->get_table_schema(index_dml_info.ref_table_id_, table_schema)
+      && OB_NOT_NULL(table_schema)) {
+    found = share::schema::ObAiColumnRuntime::has_ai_column(*table_schema);
+  }
+  return found;
+}
+
 int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
                                             const IndexDMLInfo &index_dml_info,
                                             ObDMLBaseCtDef &dml_base_ctdef,
@@ -2130,6 +2149,19 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
   if (OB_SUCC(ret)) {
     // Mark the ctdef as a main-table operation.
     dml_base_ctdef.das_base_ctdef_.is_access_main_table_ = true;
+  }
+
+  // A write to a table with AI columns has to record a task inside the
+  // transaction of the statement.  That needs the inner connection of the
+  // session, which is opened when the plan is marked as containing nested SQL.
+  if (OB_SUCC(ret) && index_dml_info.is_primary_index_) {
+    const bool has_ai_column = has_ai_column_in_table(op, index_dml_info);
+    if (has_ai_column) {
+      dml_base_ctdef.das_base_ctdef_.has_ai_column_ = true;
+      if (!cg_.phy_plan_->has_nested_sql()) {
+        cg_.phy_plan_->set_has_nested_sql(true);
+      }
+    }
   }
   return ret;
 }

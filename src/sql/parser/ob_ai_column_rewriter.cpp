@@ -39,6 +39,16 @@ namespace
 static const char *JSON_SYSTEM_PROMPT =
     "Return exactly one valid JSON value, then stop.";
 
+// System instruction for a column that holds a plain number.  The model is
+// asked for a single integer so that the value can be stored in the column
+// without a conversion step.
+static const char *INTEGER_SYSTEM_PROMPT =
+    "Return exactly one valid base-10 integer, then stop.";
+
+// System instruction for a column that holds free text.
+static const char *TEXT_SYSTEM_PROMPT =
+    "Return exactly one valid text value, then stop.";
+
 
 // Escapes a string so that it can be embedded in a single quoted SQL literal.
 std::string escape_sql_string(const std::string &in)
@@ -170,6 +180,120 @@ std::vector<std::string> split_top_level(const std::string &body)
   out.push_back(body.substr(start));
   return out;
 }
+
+// True when the type is an integral type, so that the model is asked for an
+// integer instead of free text.
+bool is_integer_type(const std::string &type_text)
+{
+  std::string low = lower_ascii(type_text);
+  // Strip a possible length or precision, e.g. "bigint(20)".
+  size_t lp = low.find('(');
+  if (lp != std::string::npos) {
+    low = trim(low.substr(0, lp));
+  }
+  size_t sp = low.find(' ');
+  if (sp != std::string::npos) {
+    low = trim(low.substr(0, sp));
+  }
+  return low == "tinyint" || low == "smallint" || low == "mediumint"
+         || low == "int" || low == "integer" || low == "bigint";
+}
+
+// The argument of the AI function that carries the input.  For
+// AI_COMPLETE(model, expr) and AI_EMBED(model, expr, dim) it is the second
+// argument.
+std::string prompt_argument(const std::string &expr)
+{
+  std::string low = lower_ascii(expr);
+  size_t p = find_word(low, "ai_complete");
+  if (p == std::string::npos) {
+    p = find_word(low, "ai_embed");
+  }
+  if (p == std::string::npos) {
+    return std::string();
+  }
+  size_t lp = expr.find('(', p);
+  size_t rp = (lp == std::string::npos) ? std::string::npos : match_paren(expr, lp);
+  if (lp == std::string::npos || rp == std::string::npos) {
+    return std::string();
+  }
+  std::vector<std::string> args = split_top_level(expr.substr(lp + 1, rp - lp - 1));
+  if (args.size() < 2) {
+    return std::string();
+  }
+  return trim(args.at(1));
+}
+
+// Column names referenced by an expression.  Only plain identifiers are
+// collected: a name that is followed by an opening parenthesis is a function
+// call, and text inside string literals is never a column reference.
+std::vector<std::string> referenced_columns(const std::string &expr,
+                                            const std::vector<std::string> &known_columns)
+{
+  std::vector<std::string> found;
+  size_t i = 0;
+  while (i < expr.size()) {
+    const char c = expr[i];
+    if (c == '\'' || c == '"' || c == '`') {
+      const char quote = c;
+      ++i;
+      while (i < expr.size()) {
+        if (expr[i] == '\\' && quote != '`') {
+          i += 2;
+          continue;
+        }
+        if (expr[i] == quote) {
+          ++i;
+          break;
+        }
+        ++i;
+      }
+      continue;
+    }
+    if (isalpha(static_cast<unsigned char>(c)) || c == '_') {
+      const size_t start = i;
+      while (i < expr.size()
+             && (isalnum(static_cast<unsigned char>(expr[i])) || expr[i] == '_')) {
+        ++i;
+      }
+      const std::string token = expr.substr(start, i - start);
+      // Skip a function call: the name is followed by an opening parenthesis.
+      size_t j = i;
+      while (j < expr.size() && isspace(static_cast<unsigned char>(expr[j]))) {
+        ++j;
+      }
+      if (j < expr.size() && expr[j] == '(') {
+        continue;
+      }
+      const std::string low = lower_ascii(token);
+      if (low == "and" || low == "or" || low == "not" || low == "null"
+          || low == "true" || low == "false" || low == "case" || low == "when"
+          || low == "then" || low == "else" || low == "end" || low == "is"
+          || low == "in" || low == "like" || low == "between" || low == "distinct") {
+        continue;
+      }
+      for (size_t k = 0; k < known_columns.size(); ++k) {
+        if (known_columns.at(k) == token) {
+          bool seen = false;
+          for (size_t m = 0; m < found.size(); ++m) {
+            if (found.at(m) == token) {
+              seen = true;
+              break;
+            }
+          }
+          if (!seen) {
+            found.push_back(token);
+          }
+          break;
+        }
+      }
+      continue;
+    }
+    ++i;
+  }
+  return found;
+}
+
 
 std::string strip_quotes(const std::string &in)
 {
@@ -322,6 +446,22 @@ int rewrite_create_table(const std::string &sql, std::string &out, bool &rewritt
   std::vector<std::string> ai_names;
   bool changed = false;
 
+  // Every column of the table, so that a reference in an AI expression can be
+  // resolved to a column of this table.
+  std::vector<std::string> all_columns;
+  for (size_t i = 0; i < elements.size(); ++i) {
+    std::string element_low = lower_ascii(elements.at(i));
+    if (element_low.find("primary key") != std::string::npos
+        || element_low.find("unique") != std::string::npos
+        || element_low.find("key ") != std::string::npos) {
+      continue;
+    }
+    const std::string name = first_token(elements.at(i));
+    if (!name.empty()) {
+      all_columns.push_back(name);
+    }
+  }
+
   for (size_t i = 0; i < elements.size() && OB_SUCC(ret); ++i) {
     std::string &element = elements.at(i);
     std::string element_low = lower_ascii(element);
@@ -383,6 +523,44 @@ int rewrite_create_table(const std::string &sql, std::string &out, bool &rewritt
     spec.actual_dim_ = embed_dim;
     spec.dim_mismatch_ = dim_mismatch;
     spec.ai_dep_column_ = ai_dep_column;
+    spec.column_type_ = low_type;
+    spec.prompt_expr_ = prompt_argument(expr);
+    {
+      // The system instruction follows the type of the target column: a JSON
+      // column has to receive a JSON document, an integral column a single
+      // integer, and anything else free text.
+      if (is_json) {
+        spec.system_prompt_ = JSON_SYSTEM_PROMPT;
+      } else if (is_integer_type(type_text)) {
+        spec.system_prompt_ = INTEGER_SYSTEM_PROMPT;
+      } else {
+        spec.system_prompt_ = TEXT_SYSTEM_PROMPT;
+      }
+      std::vector<std::string> deps = referenced_columns(expr, all_columns);
+      // An AI column never depends on itself, and it may not depend on
+      // another AI column; that case is reported by the execution stage.
+      std::string dep_text;
+      for (size_t k = 0; k < deps.size(); ++k) {
+        if (deps.at(k) == column_name) {
+          continue;
+        }
+        bool is_ai = false;
+        for (size_t m = 0; m < ai_names.size(); ++m) {
+          if (deps.at(k) == ai_names.at(m)) {
+            is_ai = true;
+            break;
+          }
+        }
+        if (is_ai) {
+          continue;
+        }
+        if (!dep_text.empty()) {
+          dep_text += ",";
+        }
+        dep_text += deps.at(k);
+      }
+      spec.dep_columns_ = dep_text;
+    }
     if (is_json) {
       spec.normalized_expr_ = std::string(is_embed ? "AI_EMBED(" : "AI_COMPLETE(")
                               + expr + ", '" + JSON_SYSTEM_PROMPT + "')";
@@ -504,6 +682,15 @@ int rewrite_alter_table(const std::string &sql, std::string &out, bool &rewritte
   spec.declared_dim_ = declared_dim;
   spec.actual_dim_ = embed_dim;
   spec.dim_mismatch_ = dim_mismatch;
+  spec.column_type_ = lower_ascii(type_text);
+  spec.prompt_expr_ = prompt_argument(expr);
+  if (is_json) {
+    spec.system_prompt_ = JSON_SYSTEM_PROMPT;
+  } else if (is_integer_type(type_text)) {
+    spec.system_prompt_ = INTEGER_SYSTEM_PROMPT;
+  } else {
+    spec.system_prompt_ = TEXT_SYSTEM_PROMPT;
+  }
   if (is_json) {
     spec.normalized_expr_ = std::string(is_embed ? "AI_EMBED(" : "AI_COMPLETE(")
                             + expr + ", '" + JSON_SYSTEM_PROMPT + "')";
@@ -524,6 +711,260 @@ int rewrite_alter_table(const std::string &sql, std::string &out, bool &rewritte
   return ret;
 }
 
+// ---------------------------------------------------------------------------
+// ALTER TABLE ... RETRY AI COLUMN
+//
+// The command does not change the schema: it invalidates the current results
+// of the selected rows and records a task for every one of them.  Both steps
+// have to run in the execution stage, because only there can an error message
+// reach the client (see the comment of the class).  The statement is therefore
+// rewritten into a harmless ALTER that adds a marker column, and the request
+// travels in the comment of that column.  The payload uses the same hex
+// encoding as the rule of an AI column:
+//
+//   v1:<hex action \x1f errno \x1f db \x1f table \x1f column \x1f predicate
+//          \x1f error message>
+//
+// The decoder in sql/engine/cmd/ob_table_executor.cpp has to be kept in sync
+// with this layout.
+static const char *AI_RETRY_MARKER_COLUMN = "__ai_retry_marker";
+static const char *AI_RETRY_ACTION_RETRY = "retry";
+static const char *AI_RETRY_ACTION_ERROR = "error";
+// MAX_COLUMN_COMMENT_CHAR_LENGTH of the resolver: the comment of the marker
+// column cannot be longer than this.
+static const int64_t AI_RETRY_MAX_COMMENT_LENGTH = 1024;
+
+size_t retry_skip_blank(const std::string &text, size_t pos)
+{
+  while (pos < text.size() && isspace(static_cast<unsigned char>(text[pos]))) {
+    ++pos;
+  }
+  return pos;
+}
+
+// Reads `keyword` (already lower case) at `pos`; a word must end at the
+// keyword, so "retry_x" does not match "retry".
+bool retry_read_keyword(const std::string &text, size_t &pos, const char *keyword)
+{
+  bool found = false;
+  const std::string wanted(keyword);
+  const size_t begin = retry_skip_blank(text, pos);
+  if (begin + wanted.size() <= text.size()
+      && lower_ascii(text.substr(begin, wanted.size())) == wanted) {
+    const size_t end = begin + wanted.size();
+    if (end == text.size() || !is_word_char(text[end])) {
+      pos = end;
+      found = true;
+    }
+  }
+  return found;
+}
+
+// Reads a plain or backtick quoted identifier.  `pos` ends right after it.
+bool retry_read_identifier(const std::string &text, size_t &pos, std::string &name)
+{
+  bool found = false;
+  const size_t begin = retry_skip_blank(text, pos);
+  if (begin < text.size() && '`' == text[begin]) {
+    std::string value;
+    size_t i = begin + 1;
+    bool closed = false;
+    while (!closed && i < text.size()) {
+      if ('`' == text[i]) {
+        if (i + 1 < text.size() && '`' == text[i + 1]) {
+          value.push_back('`');
+          i += 2;
+        } else {
+          ++i;
+          closed = true;
+        }
+      } else {
+        value.push_back(text[i]);
+        ++i;
+      }
+    }
+    if (closed) {
+      name = value;
+      pos = i;
+      found = true;
+    }
+  } else {
+    size_t i = begin;
+    while (i < text.size() && is_word_char(text[i])) {
+      ++i;
+    }
+    if (i > begin) {
+      name = text.substr(begin, i - begin);
+      pos = i;
+      found = true;
+    }
+  }
+  return found;
+}
+
+// Index of the first comma that is not inside a string, an identifier or a
+// pair of parentheses, or npos when there is none.
+size_t retry_find_top_level_comma(const std::string &text)
+{
+  size_t result = std::string::npos;
+  int depth = 0;
+  char quote = 0;
+  for (size_t i = 0; i < text.size() && std::string::npos == result; ++i) {
+    const char c = text[i];
+    if (0 != quote) {
+      if ('\\' == c && '`' != quote) {
+        ++i;
+      } else if (c == quote) {
+        if (i + 1 < text.size() && text[i + 1] == quote) {
+          ++i;  // an escaped quote is written twice
+        } else {
+          quote = 0;
+        }
+      }
+    } else if ('\'' == c || '"' == c || '`' == c) {
+      quote = c;
+    } else if ('(' == c) {
+      ++depth;
+    } else if (')' == c) {
+      if (depth > 0) {
+        --depth;
+      }
+    } else if (',' == c && 0 == depth) {
+      result = i;
+    }
+  }
+  return result;
+}
+
+std::string retry_hex_encode(const std::string &raw)
+{
+  static const char *HEX = "0123456789abcdef";
+  std::string out;
+  out.reserve(raw.size() * 2);
+  for (size_t i = 0; i < raw.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(raw[i]);
+    out.push_back(HEX[c >> 4]);
+    out.push_back(HEX[c & 0x0f]);
+  }
+  return out;
+}
+
+std::string retry_make_payload(const std::string &action,
+                               int64_t errcode,
+                               const std::string &db,
+                               const std::string &table,
+                               const std::string &column,
+                               const std::string &predicate,
+                               const std::string &message)
+{
+  std::string raw;
+  raw.append(action);
+  raw.push_back('\x1f');
+  raw.append(std::to_string(errcode));
+  raw.push_back('\x1f');
+  raw.append(db);
+  raw.push_back('\x1f');
+  raw.append(table);
+  raw.push_back('\x1f');
+  raw.append(column);
+  raw.push_back('\x1f');
+  raw.append(predicate);
+  raw.push_back('\x1f');
+  raw.append(message);
+  return std::string("v1:") + retry_hex_encode(raw);
+}
+
+// Recognizes `ALTER TABLE [db.]table RETRY AI COLUMN column [WHERE predicate]`
+// and rewrites it into the marker ALTER described above.  Everything that is
+// not exactly this command is left untouched, so ordinary statements are
+// parsed as before.
+int rewrite_retry_ai_column(const std::string &sql, std::string &out, bool &rewritten)
+{
+  int ret = OB_SUCCESS;
+  rewritten = false;
+  size_t pos = 0;
+  if (!retry_read_keyword(sql, pos, "alter") || !retry_read_keyword(sql, pos, "table")) {
+    // Not an ALTER TABLE statement.
+  } else {
+    std::string db_name;
+    std::string table_name;
+    size_t target_end = 0;
+    bool target_ok = false;
+    {
+      std::string first_name;
+      if (retry_read_identifier(sql, pos, first_name)) {
+        const size_t after_name = retry_skip_blank(sql, pos);
+        if (after_name < sql.size() && '.' == sql[after_name]) {
+          size_t second_pos = retry_skip_blank(sql, after_name + 1);
+          if (retry_read_identifier(sql, second_pos, table_name)) {
+            db_name = first_name;
+            target_end = second_pos;
+            target_ok = true;
+          }
+        } else {
+          table_name = first_name;
+          target_end = pos;
+          target_ok = true;
+        }
+      }
+    }
+    if (target_ok) {
+      std::string column_name;
+      size_t after_column = target_end;
+      if (retry_read_keyword(sql, after_column, "retry")
+          && retry_read_keyword(sql, after_column, "ai")
+          && retry_read_keyword(sql, after_column, "column")
+          && retry_read_identifier(sql, after_column, column_name)) {
+        std::string rest = trim(sql.substr(after_column));
+        // A trailing statement separator is not part of the command.
+        while (!rest.empty() && ';' == rest[rest.size() - 1]) {
+          rest = trim(rest.substr(0, rest.size() - 1));
+        }
+        std::string predicate;
+        std::string action(AI_RETRY_ACTION_RETRY);
+        int64_t errcode = 0;
+        std::string message;
+        bool build = true;
+        const size_t comma = retry_find_top_level_comma(rest);
+        if (std::string::npos != comma) {
+          // A second ALTER action would be silently ignored if the command
+          // were executed as an ordinary ALTER, so it is rejected instead.
+          action = AI_RETRY_ACTION_ERROR;
+          errcode = OB_NOT_SUPPORTED;
+          message = "combining AI COLUMN RETRY with another ALTER action not supported";
+        } else if (!rest.empty()) {
+          size_t where_pos = 0;
+          if (retry_read_keyword(rest, where_pos, "where")) {
+            predicate = trim(rest.substr(where_pos));
+            // An empty predicate is a syntax error, which the parser reports.
+            build = !predicate.empty();
+          } else {
+            // Nothing else is valid here; leave the statement to the parser.
+            build = false;
+          }
+        }
+        if (build) {
+          std::string payload = retry_make_payload(action, errcode, db_name, table_name,
+                                                   column_name, predicate, message);
+          if (payload.size() > static_cast<size_t>(AI_RETRY_MAX_COMMENT_LENGTH)) {
+            // The comment of the marker column cannot carry the request; fail
+            // with a message instead of letting the resolver report a comment
+            // that is too long.
+            payload = retry_make_payload(AI_RETRY_ACTION_ERROR, OB_NOT_SUPPORTED, db_name,
+                                         table_name, column_name, std::string(),
+                                         "AI COLUMN RETRY statement is too long");
+          }
+          out = sql.substr(0, target_end)
+              + " add column `" + std::string(AI_RETRY_MARKER_COLUMN)
+              + "` longtext null comment '" + payload + "'";
+          rewritten = true;
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 } // namespace
 
 int ObAiColumnRewriter::maybe_rewrite(ObIAllocator &alloc,
@@ -537,12 +978,18 @@ int ObAiColumnRewriter::maybe_rewrite(ObIAllocator &alloc,
   if (stmt.empty()) {
   } else {
     std::string sql(stmt.ptr(), stmt.length());
-    if (lower_ascii(sql).find("ai column") == std::string::npos) {
+    const std::string lower_sql = lower_ascii(sql);
+    // An ordinary statement is left untouched without any cost.  The RETRY
+    // command is looked for through the word "retry" too, because its words
+    // may be separated by any white space.
+    if (lower_sql.find("ai column") == std::string::npos
+        && lower_sql.find("retry") == std::string::npos) {
       // fast path, ordinary statements are untouched
     } else {
       std::string rewritten_sql;
       bool changed = false;
-      if (OB_FAIL(rewrite_create_table(sql, rewritten_sql, changed))) {
+      if (OB_FAIL(rewrite_retry_ai_column(sql, rewritten_sql, changed))) {
+      } else if (!changed && OB_FAIL(rewrite_create_table(sql, rewritten_sql, changed))) {
       } else if (!changed && OB_FAIL(rewrite_alter_table(sql, rewritten_sql, changed))) {
       } else if (changed) {
         char *buffer = static_cast<char *>(alloc.alloc(rewritten_sql.size()));

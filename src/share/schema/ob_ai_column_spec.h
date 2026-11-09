@@ -52,6 +52,15 @@ struct ObAiColumnSpec
   int64_t max_retries_;
   bool is_json_;
 
+  // The prompt expression and the system instruction are kept apart from
+  // normalized_expr_, because normalized_expr_ has to stay a valid AI
+  // function call: the third argument of AI_COMPLETE is a JSON configuration
+  // object, so a plain sentence cannot be passed there.  The worker builds the
+  // HTTP request itself and sends the instruction as the system message.
+  std::string prompt_expr_;       // the argument that carries the input
+  std::string system_prompt_;     // system message of the request
+  std::string column_type_;       // declared type of the AI column
+
   // Validation outcome, computed while the declaration is rewritten and
   // checked later in the execution stage.
   //
@@ -114,6 +123,12 @@ struct ObAiColumnSpec
     raw.append(dim_mismatch_ ? "1" : "0");
     raw.push_back('\x1f');
     raw.append(ai_dep_column_);
+    raw.push_back('\x1f');
+    raw.append(prompt_expr_);
+    raw.push_back('\x1f');
+    raw.append(system_prompt_);
+    raw.push_back('\x1f');
+    raw.append(column_type_);
     static const char *HEX = "0123456789abcdef";
     std::string out = "v1:";
     out.reserve(3 + raw.size() * 2);
@@ -183,6 +198,11 @@ struct ObAiColumnSpec
               spec.actual_dim_ = atol(parts[8].c_str());
               spec.dim_mismatch_ = ("1" == parts[9]);
               spec.ai_dep_column_ = parts[10];
+            }
+            if (parts.size() >= 14) {
+              spec.prompt_expr_ = parts[11];
+              spec.system_prompt_ = parts[12];
+              spec.column_type_ = parts[13];
             }
             ok = true;
           }

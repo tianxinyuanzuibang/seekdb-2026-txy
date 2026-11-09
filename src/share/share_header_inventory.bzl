@@ -185,6 +185,7 @@ SHARE_PUBLIC_HEADER_ROOTS = [
     "resource_limit_calculator/ob_resource_limit_calculator.h",
     "roaringbitmap/ob_rb_memory_mgr.h",
     "rpc/ob_server_task.h",
+    "schema/ob_ai_column_runtime.h",
     "schema/ob_ai_model_sql_service.h",
     "schema/ob_col_desc.h",
     "schema/ob_column_schema.h",

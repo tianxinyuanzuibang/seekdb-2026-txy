@@ -23,6 +23,7 @@
 #include "lib/container/ob_se_array.h"
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "share/ob_server_struct.h"
+#include "share/ob_thread_pool.h"
 #include "lib/worker.h"
 
 namespace oceanbase
@@ -43,6 +44,28 @@ private:
   DISALLOW_COPY_AND_ASSIGN(ObAiServiceGuard);
 };
 
+// Generation of AI columns.
+//
+// The task of a write is recorded in the same transaction as the write, so a
+// rolled back write leaves no task behind, and a task only becomes visible to
+// this worker once its transaction is committed.  The worker turns a task into
+// a write of the AI column result: it evaluates the generation rule of the
+// column on the row, and publishes the result together with the state of all
+// columns of the same change in one transaction.
+class ObAiColumnWorker : public share::ObThreadPool
+{
+public:
+  ObAiColumnWorker();
+  virtual ~ObAiColumnWorker();
+  int init();
+  void destroy();
+  void run1() override;
+private:
+  int run_one_round();
+  bool is_inited_;
+  DISALLOW_COPY_AND_ASSIGN(ObAiColumnWorker);
+};
+
 class ObAiService
 {
 public:
@@ -50,14 +73,15 @@ public:
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
   bool is_inited_;
+  ObAiColumnWorker ai_column_worker_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 

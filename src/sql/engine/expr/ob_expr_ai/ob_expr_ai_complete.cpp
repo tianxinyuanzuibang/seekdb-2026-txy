@@ -106,6 +106,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     ObString prompt;
     ObJsonObject *config = nullptr;
     ObString config_str;
+    ObString system_prompt;
     share::ObAiModelEndpointInfo resolved_endpoint;
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
@@ -137,6 +138,27 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       }
     }
 
+    // The caller can ask for a system message through the `system` member of
+    // the configuration object, for example
+    //   AI_COMPLETE('model', 'summarize this', '{"system":"answer in JSON"}')
+    // The member is not part of the request body, so it is removed from the
+    // configuration before the body is built.
+    if (OB_SUCC(ret) && OB_NOT_NULL(config)) {
+      ObIJsonBase *system_value = nullptr;
+      const ObString system_key = ObString::make_string("system");
+      if (OB_SUCCESS == config->get_object_value(system_key, system_value)
+          && OB_NOT_NULL(system_value)
+          && ObJsonNodeType::J_STRING == system_value->json_type()) {
+        const ObString system_text(system_value->get_data_length(),
+                                   system_value->get_data());
+        if (OB_FAIL(ob_write_string(temp_allocator, system_text, system_prompt))) {
+          LOG_WARN("copy the system prompt failed", K(ret));
+        } else if (OB_FAIL(config->object_remove(system_key))) {
+          LOG_WARN("remove the system prompt from the configuration failed", K(ret));
+        }
+      }
+    }
+
     if (OB_FAIL(ret)) {
     } else if (model_id.empty() || prompt.empty()) {
       ret = OB_INVALID_ARGUMENT;
@@ -153,7 +175,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     } else {
       ObAIFuncModel model(temp_allocator, *info, *endpoint_info);
       ObString result;
-      if (OB_FAIL(model.call_completion(prompt, config, result))) {
+      if (OB_FAIL(model.call_completion(system_prompt, prompt, config, result))) {
       } else if (OB_FAIL(ObAIFuncUtils::set_string_result(expr, ctx, res, result))) {
       }
     }
