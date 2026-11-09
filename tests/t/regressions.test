@@ -1,0 +1,12 @@
+# Regression cases for shapes the public pack uses:
+# quoted vector literals, ORDER BY on a projection alias, and an un-aliased
+# expression in the projection. These three shapes were once broken while the
+# rest of the suite stayed green.
+create table docs (id bigint primary key, category varchar(8), content varchar(16), embedding vector(2));
+insert into docs values (3, '乙', '三', '[0, 2]'), (1, '甲', '一', '[0, 0]'), (2, '甲', '二', '[1, 0]');
+update docs set embedding = '[3,4]' where id = 1;
+select id, l2_distance(embedding, '[0, 0]') as distance from docs order by distance limit 10;
+select id, l2_distance(embedding, '[3,4]') as distance from docs where id = 1 order by distance limit 1;
+select id, l2_distance(embedding, '[0,0]') from docs order by id;
+select l2_distance(embedding, '[0,0]') from docs where id = 2;
+select id from docs where category >= '乙' order by id;

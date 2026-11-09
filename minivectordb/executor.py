@@ -158,7 +158,16 @@ class Executor:
             return text
         if kind == "VECTOR":
             if isinstance(raw, str):
-                raise invalid_value("vector value must be a list of numbers")
+                # The task statement's own examples write vectors as quoted
+                # literals ('[0, 2]'), so a string is parsed as a vector
+                # here.  This is type-directed: only a VECTOR column does
+                # this, so a VARCHAR holding "[0,2]" stays a string.
+                parsed = V.parse_vector_text(raw)
+                if parsed is None:
+                    raise invalid_value(
+                        "vector value must be a list of numbers"
+                    )
+                raw = parsed
             if not isinstance(raw, (tuple, list)):
                 raise invalid_value("vector value must be a list of numbers")
             if column.vector_dim is not None and len(raw) != column.vector_dim:
@@ -319,10 +328,7 @@ class Executor:
             left, right = args
             if left is None or right is None:
                 return None
-            if not isinstance(left, tuple) or not isinstance(right, tuple):
-                raise invalid_value(
-                    "distance functions require vector arguments"
-                )
+            left, right = self._as_vectors(left, right)
             if len(left) != len(right):
                 raise invalid_value("vector dimension mismatch")
             return function(left, right)
@@ -471,6 +477,7 @@ class Executor:
         self.storage.insert_rows(table, rows)
         return Result.ok(
             message="{} row(s) affected".format(len(rows)),
+            affected_rows=len(rows),
         )
 
     def _exec_Update(self, stmt, mode=None):
@@ -494,7 +501,10 @@ class Executor:
                 continue
             self.storage.update_rows(table, row[pk_index], new_values)
             targets.append(row[pk_index])
-        return Result.ok(message="{} row(s) affected".format(len(targets)))
+        return Result.ok(
+            message="{} row(s) affected".format(len(targets)),
+            affected_rows=len(targets),
+        )
 
     def _exec_Delete(self, stmt, mode=None):
         table = self._table(stmt.table)
@@ -506,7 +516,92 @@ class Executor:
                     continue
             targets.append(row[pk_index])
         self.storage.delete_rows(table, targets)
-        return Result.ok(message="{} row(s) affected".format(len(targets)))
+        return Result.ok(
+            message="{} row(s) affected".format(len(targets)),
+            affected_rows=len(targets),
+        )
+
+    def _as_vectors(self, left, right):
+        """Coerce distance operands to vectors.
+
+        A quoted vector literal ('[0, 2]') is accepted here because the
+        task statement's own examples use that form.  This is type
+        directed: it only happens for distance-function arguments.
+        """
+        values = []
+        for value in (left, right):
+            if isinstance(value, str):
+                parsed = V.parse_vector_text(value)
+                if parsed is None:
+                    raise invalid_value(
+                        "distance functions require vector arguments"
+                    )
+                value = V.to_float32_values(parsed)
+            if not isinstance(value, tuple):
+                raise invalid_value(
+                    "distance functions require vector arguments"
+                )
+            values.append(value)
+        left, right = values
+        if len(left) != len(right):
+            raise invalid_value("vector dimension mismatch")
+        return left, right
+
+    def _eval_vector_operand(self, expr, table, label):
+        """Evaluate an operand that must be a vector."""
+        value = self._eval(expr, None, table)
+        if value is None:
+            raise invalid_value("{} must not be NULL".format(label))
+        if isinstance(value, str):
+            parsed = V.parse_vector_text(value)
+            if parsed is None:
+                raise invalid_value(
+                    "{} must be a list of numbers".format(label)
+                )
+            value = V.to_float32_values(parsed)
+        if not isinstance(value, tuple):
+            raise invalid_value(
+                "{} must be a list of numbers".format(label)
+            )
+        return value
+
+    def _resolve_order_terms(self, stmt, table):
+        """Resolve ORDER BY terms against projection aliases.
+
+        ``ORDER BY distance`` refers to ``... AS distance``; a name that is
+        a real column keeps meaning the column, as in MySQL.
+        """
+        aliases = {}
+        for item in stmt.items:
+            if item.alias:
+                aliases[item.alias.lower()] = item.expr
+        if not aliases:
+            return list(stmt.order_by)
+        terms = []
+        for expr, ascending in stmt.order_by:
+            if isinstance(expr, ColumnRef):
+                mapped = aliases.get(expr.name.lower())
+                if mapped is not None:
+                    is_column = True
+                    try:
+                        self._column_index(table, expr.name)
+                    except SQLError:
+                        is_column = False
+                    if not is_column:
+                        expr = mapped
+            terms.append((expr, ascending))
+        return terms
+
+    def _find_vector_expr(self, terms):
+        """The first ORDER BY term that is a distance-function call."""
+        for expr, _ascending in terms:
+            if isinstance(expr, FunctionCall):
+                try:
+                    V.get_distance_function(expr.name)
+                except SQLError:
+                    continue
+                return expr
+        return None
 
     def _truthy(self, value):
         return bool(value) if value is not None else False
@@ -546,6 +641,16 @@ class Executor:
             return self._select_without_table(stmt)
         table = self._table(stmt.table)
         columns = table.columns
+
+        # Resolve ORDER BY aliases; this also recognises the vector-search
+        # form `SELECT ... AS distance ... ORDER BY distance`.
+        if stmt.order_by:
+            stmt.order_by = self._resolve_order_terms(stmt, table)
+            if not stmt.is_vector_search:
+                found = self._find_vector_expr(stmt.order_by)
+                if found is not None:
+                    stmt.vector_expr = found
+                    stmt.is_vector_search = True
 
         if stmt.is_vector_search and stmt.vector_expr is not None:
             return self._exec_vector_select(stmt, table, mode)
@@ -912,11 +1017,9 @@ class Executor:
         column = columns[column_index]
         if column.type_name.upper() != "VECTOR":
             raise not_supported("distance functions require a vector column")
-        query = self._eval(vector_expr.args[1], None, table)
-        if query is None:
-            raise invalid_value("query vector must not be NULL")
-        if not isinstance(query, tuple):
-            raise invalid_value("query vector must be a list of numbers")
+        query = self._eval_vector_operand(
+            vector_expr.args[1], table, "query vector"
+        )
         if column.vector_dim is not None and len(query) != column.vector_dim:
             raise invalid_value(
                 "vector dimension mismatch: expected {}, got {}".format(
@@ -1280,6 +1383,10 @@ def _filter_shape(expr):
     if isinstance(expr, IsNull):
         return ("isnull", _filter_shape(expr.expr), expr.negated)
     return ("opaque", id(expr))
+
+
+def _expr_name(expr):
+    """A stable display name for a projection expression."""
     if isinstance(expr, ColumnRef):
         return expr.name
     if isinstance(expr, Literal):

@@ -46,4 +46,7 @@ RUN mkdir -p /data \
  && chmod 1777 /data
 
 # Start the database in the foreground and keep stdin open.
+# --data-dir is accepted for parity with the example in the task statement;
+# MVD_DATA_DIR=/data above already sets the same default.
 ENTRYPOINT ["python3", "-u", "-m", "minivectordb"]
+CMD ["--data-dir", "/data"]

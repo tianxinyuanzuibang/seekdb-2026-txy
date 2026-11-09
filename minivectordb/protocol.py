@@ -593,6 +593,11 @@ class LineProtocol:
         self.echo = echo
         self.pending = ""
         self.sentinel = os.environ.get("MVD_RESULT_SENTINEL") or None
+        # The published expectations are JSON assertion objects, so a driver
+        # may want JSON back for plain SQL input.  Opt-in via MVD_OUTPUT=json.
+        self.json_output = (
+            os.environ.get("MVD_OUTPUT", "text").strip().lower() == "json"
+        )
 
     def serve(self):
         while True:
@@ -645,7 +650,11 @@ class LineProtocol:
             import traceback
             traceback.print_exc(file=sys.stderr)
             result = Result.error(1105, str(exc))
-        if result.is_error:
+        if self.json_output:
+            self.out_stream.write(
+                (render_json(result) + "\n").encode("utf-8")
+            )
+        elif result.is_error:
             self.out_stream.write(
                 "ERROR {}: {}\n".format(
                     result.error_code, result.message

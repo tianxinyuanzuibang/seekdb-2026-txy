@@ -23,10 +23,11 @@ class Result:
     """The outcome of executing one statement."""
 
     __slots__ = ("columns", "rows", "message", "is_error", "error_code",
-                 "sqlstate", "statement", "row_count")
+                 "sqlstate", "statement", "row_count", "affected_rows")
 
     def __init__(self, columns=None, rows=None, message=None, is_error=False,
-                 error_code=None, sqlstate=None, statement=None):
+                 error_code=None, sqlstate=None, statement=None,
+                 affected_rows=None):
         self.columns = list(columns) if columns is not None else []
         self.rows = list(rows) if rows is not None else []
         self.message = message
@@ -35,11 +36,17 @@ class Result:
         self.sqlstate = sqlstate
         self.statement = statement
         self.row_count = len(self.rows)
+        # The count of rows changed by INSERT/UPDATE/DELETE.  ``None`` for
+        # statements that do not change rows, so the JSON envelope only
+        # carries the field when it is meaningful (it is part of the
+        # published assertion schema).
+        self.affected_rows = affected_rows
 
     @classmethod
-    def ok(cls, columns=None, rows=None, message=None, statement=None):
+    def ok(cls, columns=None, rows=None, message=None, statement=None,
+           affected_rows=None):
         return cls(columns=columns, rows=rows, message=message,
-                   statement=statement)
+                   statement=statement, affected_rows=affected_rows)
 
     @classmethod
     def status(cls, message, statement=None):
@@ -102,6 +109,8 @@ def render_json(result):
         "rows": [[_json_value(v) for v in row] for row in result.rows],
         "row_count": result.row_count,
     }
+    if result.affected_rows is not None:
+        payload["affected_rows"] = result.affected_rows
     if result.message:
         payload["message"] = result.message
     return json.dumps(payload, ensure_ascii=False)

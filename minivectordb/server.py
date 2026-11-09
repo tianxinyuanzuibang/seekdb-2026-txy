@@ -32,6 +32,23 @@ def data_dir():
     return os.environ.get("MVD_DATA_DIR") or DEFAULT_DATA_DIR
 
 
+def apply_arguments(argv):
+    """Honour ``--data-dir PATH`` (the statement's Dockerfile example uses it)."""
+    args = list(argv)
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token in ("--data-dir", "--data_dir", "--datadir"):
+            if i + 1 < len(args):
+                os.environ["MVD_DATA_DIR"] = args[i + 1]
+                return
+            return
+        if token.startswith("--data-dir="):
+            os.environ["MVD_DATA_DIR"] = token.split("=", 1)[1]
+            return
+        i += 1
+
+
 class Session:
     """Executes statements for one client connection."""
 
@@ -115,6 +132,7 @@ def _install_signal_handlers(storage):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    apply_arguments(argv)
     in_stream = sys.stdin.buffer
     out_stream = sys.stdout.buffer
 

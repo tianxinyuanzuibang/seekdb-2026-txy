@@ -113,6 +113,34 @@ def _to_float32_values_checked(values):
     return result
 
 
+def parse_vector_text(text):
+    """Parse ``'[1, 2, 3]'`` (a quoted vector literal) into a tuple.
+
+    Returns ``None`` when the text is not a vector literal, so callers can
+    keep their original error message.  Only used where a vector is
+    expected (a VECTOR column or a distance-function argument), never for
+    VARCHAR values.
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if len(text) < 2 or text[0] != "[" or text[-1] != "]":
+        return None
+    body = text[1:-1].strip()
+    if not body:
+        return ()
+    values = []
+    for part in body.split(","):
+        part = part.strip()
+        if not part:
+            return None
+        try:
+            values.append(float(part))
+        except ValueError:
+            return None
+    return tuple(values)
+
+
 def is_finite_number(value):
     return (
         isinstance(value, (int, float))

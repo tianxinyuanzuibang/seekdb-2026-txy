@@ -18,17 +18,21 @@ without updating this file** — other modules depend on them.
 
 ```
 minivectordb/
-  errors.py      DONE - error codes + SQLError
-  ast_nodes.py   DONE - AST dataclasses
-  values.py      DONE - value semantics, float32 helpers, distances
-  lexer.py       TODO  - tokenizer
-  parser.py      TODO  - SQL -> AST
-  storage.py     TODO  - pager, WAL, table storage, recovery
-  vector_index.py TODO - self-built approximate vector index
-  executor.py    TODO  - statement execution
-  protocol.py    TODO  - stdin/stdout result rendering
-  server.py      TODO  - main loop
+  errors.py       error codes + SQLError
+  ast_nodes.py    AST dataclasses
+  values.py       value semantics, float32 helpers, distances
+  results.py      Result container + text/JSON rendering
+  lexer.py        tokenizer
+  parser.py       SQL -> AST
+  storage.py      WAL, row logs, catalog, recovery, caches
+  vector_index.py self-built approximate vector index
+  executor.py     statement execution
+  protocol.py     stdin/stdout framing (line / MySQL wire / JSON)
+  server.py       main loop, ready signal, signal handling
 ```
+
+All modules are implemented. The interface notes below are kept as the
+record of the contract the modules were built against.
 
 ## 2. Values (see `values.py`)
 

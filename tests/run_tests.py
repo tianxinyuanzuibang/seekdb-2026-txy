@@ -96,7 +96,11 @@ def run_case(test_path, result_path, keep_data=False, verbose=False):
 
 def discover():
     cases = []
-    for root, _dirs, files in os.walk(HERE):
+    for root, dirs, files in os.walk(HERE):
+        # tests/official holds the organisers' JSON-assertion cases, which
+        # have their own runner (run_official_cases.py); they are not in the
+        # mysqltest text format compared here.
+        dirs[:] = [d for d in dirs if d != "official"]
         for name in files:
             if not name.endswith(".test"):
                 continue
