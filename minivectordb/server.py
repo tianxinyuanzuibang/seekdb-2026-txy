@@ -186,6 +186,10 @@ def main(argv=None):
     def runner(sql, mode=None):
         return session.run(sql, mode)
 
+    def set_mode(mode):
+        """Switch the search mode of the running session (driver directive)."""
+        session.executor.session_mode = mode
+
     requested = (os.environ.get("MVD_PROTOCOL") or "auto").strip().lower()
 
     try:
@@ -194,12 +198,14 @@ def main(argv=None):
             if requested == "json":
                 proto.JsonProtocol(in_stream, out_stream, runner).serve()
             else:
-                proto.LineProtocol(in_stream, out_stream, runner).serve()
+                proto.LineProtocol(
+                    in_stream, out_stream, runner, set_mode=set_mode
+                ).serve()
         elif requested == "mysql":
             proto.emit_ready()
             proto.MySQLProtocol(in_stream, out_stream, runner).serve()
         else:
-            _serve_auto(in_stream, out_stream, runner)
+            _serve_auto(in_stream, out_stream, runner, set_mode)
     finally:
         try:
             storage.close()
@@ -208,7 +214,7 @@ def main(argv=None):
     return 0
 
 
-def _serve_auto(in_stream, out_stream, runner):
+def _serve_auto(in_stream, out_stream, runner, set_mode=None):
     """Detect the protocol from the first bytes on stdin."""
     # Peek without consuming so we can decide.
     first = in_stream.peek(8) if hasattr(in_stream, "peek") else b""
@@ -230,7 +236,9 @@ def _serve_auto(in_stream, out_stream, runner):
         return
 
     proto.emit_ready()
-    proto.LineProtocol(in_stream, out_stream, runner).serve()
+    proto.LineProtocol(
+        in_stream, out_stream, runner, set_mode=set_mode
+    ).serve()
 
 
 class _PrependStream:

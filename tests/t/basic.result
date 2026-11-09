@@ -1,5 +1,4 @@
 create table t1 (id bigint, name varchar(20), score bigint, primary key (id));
-Table 't1' created
 insert into t1 values (1, 'alice', 90);
 1 row(s) affected
 insert into t1 values (2, 'bob', 75);

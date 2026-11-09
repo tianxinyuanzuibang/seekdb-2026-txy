@@ -55,6 +55,21 @@ def _env_flag(name, default=False):
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+# A driver directive: "--mode ann" / "--mode exact".  It must start at the
+# beginning of a line and is terminated by the end of that line.
+_DIRECTIVE_RE = re.compile(r"--mode[ \t]+[A-Za-z]+")
+
+
+def _directive_at(text, index):
+    """True when a driver directive starts at ``index``."""
+    if not text.startswith("--mode", index):
+        return False
+    # it has to be at the start of a line
+    if index > 0 and text[index - 1] not in "\n\r":
+        return False
+    return bool(_DIRECTIVE_RE.match(text, index))
+
+
 _QUOTED = re.compile(
     r"'(?:[^'\\]|\\.|'')*'"      # single-quoted string
     r'|"(?:[^"\\]|\\.|"")*"'     # double-quoted string
@@ -200,6 +215,20 @@ def split_statements(text):
             i += 1
             continue
         if ch == "-" and i + 1 < n and text[i + 1] == "-":
+            if _directive_at(text, i):
+                # A driver directive is not a comment: it ends the current
+                # statement and is reported on its own.
+                if buf:
+                    statements.append(("".join(buf), False))
+                    buf = []
+                end = text.find("\n", i)
+                if end == -1:
+                    statements.append((text[i:], False))
+                    i = n
+                else:
+                    statements.append((text[i:end], False))
+                    i = end
+                continue
             # A line comment runs to the end of the line.
             end = text.find("\n", i)
             if end == -1:
@@ -582,10 +611,14 @@ def looks_like_mysql_server(first_bytes):
 class LineProtocol:
     """Mysqltest-style text protocol over a byte stream."""
 
-    def __init__(self, in_stream, out_stream, runner, echo=None):
+    def __init__(self, in_stream, out_stream, runner, echo=None,
+                 set_mode=None):
         self.in_stream = in_stream
         self.out_stream = out_stream
         self.runner = runner
+        # Called with 'exact' or 'ann' when the driver sends a mode
+        # directive.
+        self.set_mode = set_mode
         if echo is None:
             # Do NOT echo by default: the published `.result` files are JSON
             # assertion objects, so the driver parses our stdout into
@@ -622,26 +655,33 @@ class LineProtocol:
             else:
                 self.pending += text
             # Consume every complete statement that is now buffered.  The
-            # scan is done once per buffer and the remainder is kept, so a
-            # multi-hundred-kilobyte batch statement is not rescanned.
+            # splitter understands driver directives ("--mode ann"), which
+            # are not SQL and have to end the preceding statement.
             while True:
                 if not self.pending.strip():
                     self.pending = ""
                     break
-                in_single, in_double, in_backtick, depth, semi = \
-                    _scan_state(self.pending)
-                if semi >= 0:
-                    statement = self.pending[:semi]
-                    self.pending = self.pending[semi + 1:]
-                else:
-                    if in_single or in_double or in_backtick or depth > 0:
-                        # Incomplete statement - wait for more input.
-                        break
-                    statement = self.pending
-                    self.pending = ""
-                statement = statement.strip()
-                if statement:
-                    self._run(statement)
+                items = split_statements(self.pending)
+                if not items:
+                    break
+                text_only, terminated = items[0]
+                if not terminated and not text_only.strip():
+                    # An empty chunk (for example the newline that follows a
+                    # driver directive) carries nothing: consume it and go on
+                    # instead of waiting for more input.
+                    consumed = len(text_only)
+                    self.pending = self.pending[consumed:]
+                    continue
+                if not terminated and not _is_balanced(text_only):
+                    # Incomplete statement - wait for more input.
+                    break
+                consumed = len(text_only)
+                if terminated:
+                    consumed += 1
+                self.pending = self.pending[consumed:]
+                text_only = text_only.strip()
+                if text_only:
+                    self._run(text_only)
         if self.pending.strip():
             for text_only, _ in split_statements(self.pending):
                 if text_only.strip():
@@ -649,7 +689,23 @@ class LineProtocol:
         self.pending = ""
 
     def _run(self, sql):
-        if not sql or sql.startswith("--") or sql.startswith("#"):
+        if not sql:
+            return
+        stripped = sql.strip()
+        if stripped.startswith("--mode"):
+            # Driver directives.  The published case pack uses two of them
+            # and they are not SQL:
+            #   --mode ann   subsequent vector requests use the ann mode
+            #   --mode exact subsequent vector requests use the exact mode
+            # The mode is switched in the running session, because the
+            # driver does not restart the process for it.
+            words = stripped.split()
+            mode = words[1].lower() if len(words) > 1 else ""
+            if mode in ("ann", "exact") and self.set_mode is not None:
+                self.set_mode(mode)
+            return
+        if stripped.startswith("--") or stripped.startswith("#"):
+            # an ordinary comment
             return
         if self.echo:
             self.out_stream.write(

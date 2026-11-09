@@ -1,5 +1,4 @@
 create table docs (id bigint primary key, category varchar(8), content varchar(16), embedding vector(2));
-Table 'docs' created
 insert into docs values (3, '乙', '三', '[0, 2]'), (1, '甲', '一', '[0, 0]'), (2, '甲', '二', '[1, 0]');
 3 row(s) affected
 update docs set embedding = '[3,4]' where id = 1;

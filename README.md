@@ -58,7 +58,7 @@ variable and the Dockerfile can change it in one line:
 
 | `MVD_PROFILE` | framing |
 |---|---|
-| `text` (default) | plain text, one response per statement, **no** echo, blank line as the response terminator |
+| `text` (default) | plain text, one response per statement, **no** echo, blank line as the response terminator. A query answers with the column header and the rows; a DML statement answers with a single `N row(s) affected` line |
 | `echo` | text that repeats the statement first, mysqltest `.result` style, no blank line |
 | `json` | one JSON object per statement: `{"columns":…,"rows":…,"affected_rows":…}` |
 | `mysql` | MySQL client/server protocol over the stdin/stdout pipes |
@@ -235,6 +235,20 @@ index (recall is validated against brute force).
 * A result with fewer than K matches returns all of them.
 * A filtered Top-K is computed **within** the filtered set - the filter is
   applied before the top K is taken.
+
+### Driver directives
+
+The published case pack uses two directives in its `.test` files, which are
+not SQL:
+
+* `--restart` - shut down normally (waiting for the exit) and start again
+  against the same data directory. The shutdown must roll back any
+  uncommitted transaction.
+* `--mode ann` - subsequent vector requests use the `ann` mode; every case
+  starts in the `exact` mode.
+
+`tests/run_official_cases.py` implements both, so the published cases run
+against the database exactly as the organiser's driver would drive them.
 
 ### Errors
 

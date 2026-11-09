@@ -39,15 +39,17 @@ class OfficialCasesTest(unittest.TestCase):
         self.assertEqual(listed, set(runner.discover()))
 
     def test_statements_match_expectations(self):
+        """Every SQL statement must have exactly one assertion.
+
+        Driver directives (--restart, --mode ann) are not SQL and do not
+        occupy an assertion slot.
+        """
         for name in runner.discover():
             with self.subTest(case=name):
-                statements = runner.read_statements(
-                    os.path.join(runner.OFFICIAL_DIR, name + ".test")
-                )
-                with open(
-                    os.path.join(runner.OFFICIAL_DIR, name + ".result"),
-                    "r", encoding="utf-8",
-                ) as handle:
+                test_path, result_path = runner.case_paths(name)
+                items = runner.parse_lines(test_path)
+                statements = [p for kind, p in items if kind == "sql"]
+                with open(result_path, "r", encoding="utf-8") as handle:
                     expectations = json.load(handle)
                 self.assertEqual(
                     len(statements), len(expectations),

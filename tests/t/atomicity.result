@@ -1,5 +1,4 @@
 create table at1 (id bigint primary key, c varchar(8), src varchar(20));
-Table 'at1' created
 insert into at1 values (1, 'a', 'ok'), (2, 'b', 'toolongvalue');
 2 row(s) affected
 update at1 set c = src where id > 0;
@@ -15,7 +14,6 @@ id	c
 1	z
 2	b
 create table at2 (id bigint primary key, e vector(2), s varchar(20));
-Table 'at2' created
 insert into at2 values (1, '[0,0]', '[9,9]'), (2, '[1,1]', '[1,2,3]');
 2 row(s) affected
 update at2 set e = s where id > 0;
@@ -25,7 +23,6 @@ id	e
 1	[0,0]
 2	[1,1]
 create table at3 (id bigint primary key, e vector(2), c varchar(8));
-Table 'at3' created
 insert into at3 values (1, '[0,0]', 'x'), (2, '[1,0]', 'y'), (3, '[2,0]', 'y');
 3 row(s) affected
 select id, l2_distance(e, '[0,0]') as d from at3 order by d limit 2;

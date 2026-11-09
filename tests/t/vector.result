@@ -1,5 +1,4 @@
 create table v1 (id bigint, tag varchar(16), vec vector(3), primary key (id));
-Table 'v1' created
 insert into v1 values (1, 'a', [0,0,0]);
 1 row(s) affected
 insert into v1 values (2, 'a', [1,0,0]);

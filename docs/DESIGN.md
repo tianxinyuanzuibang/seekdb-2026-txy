@@ -189,7 +189,7 @@ key ascending.
 | Crash recovery | `tests/test_crash.py`, 6 scenarios incl. repeated kills during recovery | pass |
 | Persistence | clean restart and SIGKILL restart | pass |
 | MySQL wire protocol | stock `mysql` client: DDL, INSERT, SELECT, vector Top-K | pass |
-| **Official public cases** | organisers' `mysqltest/cases` (5 cases, JSON assertions) | **5/5 pass** |
+| **Official public cases** | organisers' `mysqltest/cases` (20 cases, 95 SQL, JSON assertions, incl. `--restart` and `--mode ann`) | **20/20 pass** |
 | `affected_rows` contract | asserted by the public `.result` files; exposed as a real result field and in the JSON envelope | pass |
 | Performance | `tests/bench.py`, 10,000 × 128 dims, 1,000 TopK | see below |
 

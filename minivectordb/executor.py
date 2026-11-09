@@ -15,6 +15,7 @@ import heapq
 import math
 import os
 import struct
+import sys
 
 from . import values as V
 from .errors import (SQLError, bad_field, duplicate_key, duplicate_key,
@@ -1091,19 +1092,47 @@ class Executor:
                 if name not in needed:
                     needed.append(name)
 
-        distance = math.dist if function is V.l2_distance else function
         limit = stmt.limit
         offset = stmt.offset or 0
+        scanner = getattr(self.storage, "scan_columns", None)
+        if scanner is None:
+            return None
+
+        # In ann mode the index produces the candidate set; in exact mode
+        # every visible row is scored.
+        #
+        # The filter has to be applied FIRST: the index must search inside
+        # the filtered set, otherwise the candidates come from the whole
+        # table and the intersection with the filter is almost empty.
+        search_mode = self._resolve_mode(stmt, mode)
+        ann_allowed = None
+        if search_mode == "ann":
+            index = self._vector_index_for(table)
+            if index is not None:
+                filtered = None
+                if stmt.where is not None:
+                    filtered = set()
+                    for pk, values in scanner(table, needed, ordered=False):
+                        row = self._row_from_values(table, values, pk)
+                        if self._truthy(self._eval(stmt.where, row, table)):
+                            filtered.add(pk)
+                wanted = limit if limit else len(needed)
+                try:
+                    candidates = index.search(query, wanted, filtered)
+                except Exception:                  # pragma: no cover
+                    candidates = []
+                ann_allowed = {entry[0] for entry in candidates}
+
+        distance = math.dist if function is V.l2_distance else function
         # With no LIMIT every matching row is returned, so all candidates
         # have to be kept; with a LIMIT only the best (limit + offset) are
         # needed.
         keep = (limit + offset) if limit is not None else None
 
-        scanner = getattr(self.storage, "scan_columns", None)
         best = []
-        if scanner is None:
-            return None
         for pk, values in scanner(table, needed, ordered=False):
+            if ann_allowed is not None and pk not in ann_allowed:
+                continue
             if stmt.where is not None:
                 row = self._row_from_values(table, values, pk)
                 if not self._truthy(self._eval(stmt.where, row, table)):
@@ -1210,6 +1239,12 @@ class Executor:
         if not has_cache and not self.in_transaction:
             # The streaming path reads committed rows only, so it must not be
             # used inside a transaction where the overlay has to be visible.
+            # The direction has to be known before it runs.
+            found, descending = self._find_vector_expr(stmt.order_by)
+            if found is not None:
+                stmt.vector_expr = found
+                stmt.is_vector_search = True
+                self._vector_descending = descending
             streamed = self._stream_vector_select(stmt, table, mode)
             if streamed is not None:
                 return streamed
@@ -1320,6 +1355,9 @@ class Executor:
         """
         if allowed is not None and not allowed:
             return []
+        if os.environ.get("MVD_TRACE_ANN"):
+            sys.stderr.write("ANN-PATH-USED\n")
+            sys.stderr.flush()
         index = self._vector_index_for(table)
         if index is None:
             return self._exact_order(table, allowed, vectors, function, query)

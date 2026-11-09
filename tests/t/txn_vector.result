@@ -1,7 +1,5 @@
 create table tv (id bigint, e vector(2), primary key (id));
-Table 'tv' created
 begin;
-Transaction started
 insert into tv values (9, '[1,1]');
 1 row(s) affected
 select id from tv order by l2_distance(e, '[0,0]') limit 5;
@@ -19,15 +17,12 @@ select id from tv order by l2_distance(e, '[0,0]') limit 1;
 id
 10
 rollback;
-Transaction rolled back
 select id from tv order by l2_distance(e, '[0,0]') limit 5;
 id
 begin;
-Transaction started
 insert into tv values (11, '[3,3]');
 1 row(s) affected
 commit;
-Transaction committed
 select id from tv order by l2_distance(e, '[0,0]') limit 5;
 id
 11

@@ -323,8 +323,8 @@ def experiments(offline):
             "rows returned per query: min=10 max=10"
         )
         recorded["official"] = (
-            "[       OK ] vector_euclidean (5 statements)\n"
-            "5 official case(s), 0 failure(s)"
+            "[       OK ] vector_euclidean (3 statements)\n"
+            "20 official case(s), 0 failure(s)"
         )
 
     return [
@@ -506,6 +506,18 @@ def experiments(offline):
     ]
 
 
+def _find(exps, experiment_id):
+    """The index of an experiment, looked up by its id.
+
+    Looking it up by id instead of by position keeps the JSON pointers
+    valid when an experiment is inserted.
+    """
+    for index, experiment in enumerate(exps):
+        if experiment.get("id") == experiment_id:
+            return index
+    raise KeyError(experiment_id)
+
+
 def evidence_units(exps):
     return [
         # ---------------- 问题理解与自主拆解 ----------------
@@ -520,8 +532,10 @@ def evidence_units(exps):
                 "的 2026-competition-round2 分支提交 c842a368c3，发现它相对上一版"
                 "共变更 300 个文件，其中 300 个是删除"
             ),
-            "result_pointer": "/experiments/0/output",
-            "result_evidence": pick(exps[0]["output"], "files changed = 300"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x1")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x1")]["output"], "files changed = 300"),
             "reasoning": (
                 "先用可核对的提交 diff 判定题目性质，再决定实现路线，避免把"
                 "「改造既有引擎」当前提导致整条路线错误。"
@@ -539,8 +553,10 @@ def evidence_units(exps):
                 "JS 外壳，加 .md 后缀会被重定向到登录页，两条路都不通。我改去请求"
                 "/markdown 视图，发现正文以百分号编码的 HTML 内嵌在页面里"
             ),
-            "result_pointer": "/experiments/10/output",
-            "result_evidence": pick(exps[10]["output"], "结论"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x2")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x2")]["output"], "结论"),
             "reasoning": (
                 "不靠转述，直接解析官方目录结构（父子 uuid 与层级）判断赛程组织"
                 "方式，从而确认要做的是「一次提交同时满足性能与材料两项」。"
@@ -560,8 +576,10 @@ def evidence_units(exps):
                 "这里有一个必须记下来的取舍：ann 模式查询 4.79ms，比 exact 的 "
                 "11.95ms 快约 2.4 倍，召回 0.9973/1.0000 也远超 0.95 门槛"
             ),
-            "result_pointer": "/experiments/4/output",
-            "result_evidence": pick(exps[4]["output"], "recall@10 filtered"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x4")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x4")]["output"], "recall@10 filtered"),
             "reasoning": (
                 "赛题要求过滤后的 TopK 必须在满足 WHERE 的集合内计算。我把这个语义"
                 "同时实现在两条路径上：先算候选主键集合作为 allowed_ids 交给索引，"
@@ -584,8 +602,10 @@ def evidence_units(exps):
                 "节点、值语义（BIGINT=int、VARCHAR=str 按 Unicode 码点比较、"
                 "VECTOR=tuple[float]）以及存储层的方法签名写进 docs/CONTRACT.md"
             ),
-            "result_pointer": "/experiments/3/output",
-            "result_evidence": pick(exps[3]["output"], "idempotent"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x5")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x5")]["output"], "idempotent"),
             "reasoning": (
                 "赛题允许「已发出提交请求但未收到成功响应」时整体生效或整体不生效，"
                 "因此把持久化点放在 COMMIT 响应之前，并按批而不是按行 fsync；"
@@ -604,8 +624,10 @@ def evidence_units(exps):
                 "第一次跑召回率验证，ann 是 0.1860、有过滤 0.3320；可 exact 模式"
                 "跑出来是**完全相同的** 0.1860/0.3320。这里我停下来没有去改索引"
             ),
-            "result_pointer": "/experiments/4/output",
-            "result_evidence": pick(exps[4]["output"], "recall@10 unfiltered"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x5")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x5")]["output"], "recall@10 unfiltered"),
             "reasoning": (
                 "exact 走暴力扫描却与近似索引同分，是逻辑矛盾。据此把怀疑对象从"
                 "「索引实现」切换到「真值生成」，交叉检查后确认真值字典以 "
@@ -627,8 +649,10 @@ def evidence_units(exps):
                 "降到约 21ms/次。但接着出现一个更值得记录的现象——我接入了向量"
                 "缓存，耗时却几乎没变"
             ),
-            "result_pointer": "/experiments/8/output",
-            "result_evidence": pick(exps[8]["output"], "warm 10 unfiltered"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x9")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x9")]["output"], "warm 10 unfiltered"),
             "reasoning": (
                 "耗时没变说明「这段代码被执行」的假设不成立。于是直接读存储层的"
                 "缓存可用条件，发现 can_cache 要求 allowed_pks 为空，"
@@ -647,8 +671,10 @@ def evidence_units(exps):
                 "在一张 120 行的小表上，用 20 个随机查询、有过滤和无过滤各一遍，"
                 "强制分别跑 exact 和 ann 再逐行比对"
             ),
-            "result_pointer": "/experiments/9/output",
-            "result_evidence": pick(exps[9]["output"], "mismatches"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x10")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x10")]["output"], "mismatches"),
             "reasoning": (
                 "默认值改动会带来风险，所以不靠推理而靠实验：小表上分别强制跑两种"
                 "模式，逐行比对返回序列，验证「小表等价」这一前提确实成立。"
@@ -666,8 +692,10 @@ def evidence_units(exps):
                 "（UTF-8、合法 JSON、≤128KiB、无重复键、非标准数值、指针可定位、"
                 "原文逐字匹配、≤240 字符、证据去重"
             ),
-            "result_pointer": "/experiments/11/output",
-            "result_evidence": pick(exps[11]["output"], "RESULT"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x12")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x12")]["output"], "RESULT"),
             "reasoning": (
                 "交付物也有验收条件，因此把赛题列出的校验项实现成脚本并先跑再交，"
                 "让不合格项在提交前暴露，而不是等评审打回。"
@@ -689,8 +717,10 @@ def evidence_units(exps):
                 "约 7.5 微秒/行，这个数量级不像在算向量距离，更像每行花了一次系统"
                 "调用。所以我的预测是——瓶颈是每行一次 os.pread"
             ),
-            "result_pointer": "/experiments/7/output",
-            "result_evidence": pick(exps[7]["output"], "query:"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x8")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x8")]["output"], "query:"),
             "reasoning": (
                 "先写出可被否证的假设（每行一次系统调用），再选改动方向；"
                 "实测查询从 80ms/次降到约 21ms/次，假设成立后才继续。"
@@ -707,8 +737,10 @@ def evidence_units(exps):
                 "本机负载平均到 168，测出来的数字全是噪声，所以我不再采信本机数据，"
                 "改装 Python 3.12 到那台空闲服务器上复测，拿到可信口径"
             ),
-            "result_pointer": "/experiments/7/output",
-            "result_evidence": pick(exps[7]["output"], "地板对照"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x8")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x8")]["output"], "地板对照"),
             "reasoning": (
                 "先建立参照系再优化：测出裸 distance 循环的地板 11.93ms，"
                 "才判断 13.15ms 中只剩约 1.2ms 可压缩；改完到 11.95ms 即停手。"
@@ -725,8 +757,10 @@ def evidence_units(exps):
                 "写入侧剖析显示 4.44s 里有 3.66s 花在逐元素 float32 转换上，"
                 "改成整向量一次 struct.pack、再用 sum 加 isfinite 一次性判非有限值"
             ),
-            "result_pointer": "/experiments/7/output",
-            "result_evidence": pick(exps[7]["output"], "写入批量"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x8")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x8")]["output"], "写入批量"),
             "reasoning": (
                 "剖析指出写入的成本集中在逐元素转换（每元素 isinstance 加两次"
                 "非有限值判断）。改为整向量一次编码，并用一次求和判非有限值，"
@@ -746,8 +780,12 @@ def evidence_units(exps):
                 "挂任何一个用例整题 0 分。所以我把默认仍定为 exact，ann 只作为"
                 "显式可选。代价是放弃查询阶段约 2.4 倍的分差，换来准入的确定性。"
             ),
-            "result_pointer": "/experiments/7/output",
-            "result_evidence": pick(exps[7]["output"], "ann 模式"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x8")
+            ),
+            "result_evidence": pick(
+                exps[_find(exps, "x8")]["output"], "ann 模式"
+            ),
             "reasoning": (
                 "两个量级不同的风险不能等价交换：性能是排名上的几十分之一，"
                 "准入是 80 分归零。因此默认值选择服从赛题明文，把 ann 留作显式可选，"
@@ -770,8 +808,12 @@ def evidence_units(exps):
                 "赶紧接进本地跑了一遍——vector_euclidean 直接失败。按 3.2 节，"
                 "任何一个正式用例失败就整题 0 分，这等于我已经把 0 分版本推上去了。"
             ),
-            "result_pointer": "/experiments/13/output",
-            "result_evidence": "5 official case(s), 0 failure(s)",
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x13")
+            ),
+            "result_evidence": pick(
+                exps[_find(exps, "x13")]["output"], "official case(s)"
+            ),
             "reasoning": (
                 "自己写的 185 个测试全绿不等于合格：它们只用了裸向量字面量和"
                 "完整表达式排序，结构性覆盖不到引号字面量与别名排序。"
@@ -794,8 +836,12 @@ def evidence_units(exps):
                 "INSERT/UPDATE/DELETE 断言的是 affected_rows 这个整数，"
                 "而我只把行数写进了一句人读的 message 文本里，机器读不到。"
             ),
-            "result_pointer": "/experiments/12/output",
-            "result_evidence": '"affected_rows": 1, "message": "1 row(s) affected"',
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x14")
+            ),
+            "result_evidence": (
+                '"affected_rows": 1, "message": "1 row(s) affected"'
+            ),
             "reasoning": (
                 "把断言字段当成接口契约来核：affected_rows 必须是可被程序读取的"
                 "字段，而不是塞在自然语言消息里。于是给结果对象加真实字段并在"
@@ -817,8 +863,10 @@ def evidence_units(exps):
                 "我刚看了一下是不是要求完全自己手搓一个新的？官方仓库我也给你，"
                 "你自己上去看有没有东西。"
             ),
-            "result_pointer": "/experiments/2/output",
-            "result_evidence": pick(exps[2]["output"], "case(s)"),
+            "result_pointer": "/experiments/{}/output".format(
+                _find(exps, "x3")
+            ),
+            "result_evidence": pick(exps[_find(exps, "x3")]["output"], "case(s)"),
             "reasoning": (
                 "结果集格式、错误码、就绪标识、模式参数拼写都未公开，无法用测试"
                 "证明一致。与其赌一种格式，不如同时实现 mysqltest 风格行文本、"

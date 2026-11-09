@@ -1,9 +1,7 @@
 create table tx1 (id bigint, v bigint, primary key (id));
-Table 'tx1' created
 insert into tx1 values (1, 10);
 1 row(s) affected
 begin;
-Transaction started
 insert into tx1 values (2, 20);
 1 row(s) affected
 select id, v from tx1;
@@ -11,13 +9,11 @@ id	v
 1	10
 2	20
 commit;
-Transaction committed
 select id, v from tx1;
 id	v
 1	10
 2	20
 begin;
-Transaction started
 update tx1 set v = 99 where id = 1;
 1 row(s) affected
 select id, v from tx1;
@@ -25,20 +21,17 @@ id	v
 1	99
 2	20
 rollback;
-Transaction rolled back
 select id, v from tx1;
 id	v
 1	10
 2	20
 begin;
-Transaction started
 delete from tx1 where id = 1;
 1 row(s) affected
 select id, v from tx1;
 id	v
 2	20
 rollback;
-Transaction rolled back
 select id, v from tx1;
 id	v
 1	10

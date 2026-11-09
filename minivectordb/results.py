@@ -79,11 +79,17 @@ def render_text(result):
         lines.append("\t".join(result.columns))
         for row in result.rows:
             lines.append("\t".join(format_value(v) for v in row))
-    if result.message:
-        if lines:
-            lines.append(result.message)
-        else:
-            lines.append(result.message)
+    if result.affected_rows is not None:
+        # The published assertions include affected_rows, so the text
+        # rendering has to carry the count.  It replaces the human readable
+        # message so that a response stays a single line for a DML
+        # statement, which keeps the framing unambiguous.
+        return "\n".join(
+            lines + ["{} row(s) affected".format(result.affected_rows)]
+        )
+    # A statement that only reports a status (DDL, BEGIN, COMMIT, ...) has
+    # no result set and no row count; the text rendering stays empty so the
+    # driver sees an empty response rather than an unexpected line.
     return "\n".join(lines)
 
 
@@ -104,13 +110,15 @@ def render_json(result):
         }
         return json.dumps(payload, ensure_ascii=False)
 
-    payload = {
-        "columns": list(result.columns),
-        "rows": [[_json_value(v) for v in row] for row in result.rows],
-        "row_count": result.row_count,
-    }
+    payload = {}
+    if result.columns:
+        payload["columns"] = list(result.columns)
+    if result.rows:
+        payload["rows"] = [[_json_value(v) for v in row] for row in result.rows]
     if result.affected_rows is not None:
         payload["affected_rows"] = result.affected_rows
+    if result.row_count:
+        payload["row_count"] = result.row_count
     if result.message:
         payload["message"] = result.message
     return json.dumps(payload, ensure_ascii=False)

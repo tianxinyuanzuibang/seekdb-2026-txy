@@ -1,5 +1,4 @@
 create table e1 (id bigint, name varchar(10), primary key (id));
-Table 'e1' created
 insert into e1 values (1, 'a');
 1 row(s) affected
 insert into e1 values (1, 'b');
