@@ -547,9 +547,10 @@ int publish_group(const AiTaskGroup &group,
                                         rules.at(i).prompt_expr_.ptr()))) {
       } else if (OB_FAIL(append_sql_literal(sql, guards.at(i)))) {
       } else if (OB_FAIL(trans.write(sql.ptr(), affected_rows))) {
+        LOG_WARN("the publish write failed", K(ret), K(sql));
       } else if (0 >= affected_rows) {
         LOG_WARN("the ai column result was not published, the request is stale",
-                 K(sql), K(affected_rows));
+                 K(affected_rows));
       }
     }
     // The tasks of the change are consumed together with its results.
@@ -620,6 +621,7 @@ int process_group(const AiTaskGroup &group)
       }
       bool claimed = false;
       if (OB_FAIL(claim_task(column, group.table_id_, group.request_id_, claimed))) {
+        LOG_WARN("the ai column claim failed", K(ret));
       } else if (!claimed) {
         // Another worker owns the task, or it is already done.
         continue;
@@ -641,8 +643,6 @@ int process_group(const AiTaskGroup &group)
                                          group.request_id_, error_code))) {
           }
         } else {
-          LOG_INFO("ai column request is stale, the row no longer matches",
-                   K(target.predicate_));
           if (OB_FAIL(delete_task(*GCTX.sql_proxy_, group.table_id_,
                                   column.column_id_, column.rowkey_hash_,
                                   group.request_id_))) {
@@ -880,6 +880,7 @@ int ObAiColumnWorker::run_one_round()
   if (OB_ISNULL(GCTX.sql_proxy_) || OB_ISNULL(GCTX.schema_service_)) {
     ret = OB_NOT_INIT;
   } else if (OB_FAIL(read_tasks(allocator, groups))) {
+    LOG_WARN("the ai column worker cannot read the tasks", K(ret));
   } else {
     for (int64_t i = 0; OB_SUCC(ret) && i < groups.count(); ++i) {
       if (OB_FAIL(process_group(*groups.at(i)))) {

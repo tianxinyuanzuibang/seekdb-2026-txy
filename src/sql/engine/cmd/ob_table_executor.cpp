@@ -391,13 +391,13 @@ int ai_retry_rewrite_predicate(const std::string &predicate,
                   predicate.substr(value_begin + 1, value_end - value_begin - 1));
               if ("ready" == value || "failed" == value || "pending" == value) {
                 state = value;
-                // The condition on the state becomes a condition on the value
-                // of the column; the state itself is resolved by the
-                // statement that selects the rows.
+                // The condition on the state is removed from the condition of
+                // the retry: the state of a row is resolved by the statement
+                // that selects the rows, because it is read from the task
+                // table, which that statement may not read while it writes
+                // it.
                 out.append(predicate, copied, i - copied);
-                out.append("(" + column_sql + " IS ");
-                out.append("ready" == state ? "NOT NULL" : "NULL");
-                out.append(")");
+                out.append("1 = 1");
                 copied = value_end + 1;
                 i = value_end + 1;
                 continue;
@@ -466,23 +466,32 @@ int ai_retry_select_rows(const std::string &table_sql,
   row_list.clear();
   ObSqlString sql;
   ObCommonSqlProxy proxy;
-  if ("ready" == state) {
-    // A row is ready when it holds a result.
+  if (state.empty()) {
+    // The condition of the retry does not select by state, so every row that
+    // matches it is selected.
     if (OB_FAIL(sql.assign_fmt("SELECT %s FROM %s WHERE %s",
                                rowkey_expression.c_str(), table_sql.c_str(),
                                predicate.c_str()))) {
       ret = OB_ERR_UNEXPECTED;
     }
+  } else if ("ready" == state) {
+    // A row is ready when it holds a result.
+    if (OB_FAIL(sql.assign_fmt("SELECT %s FROM %s WHERE %s AND %s IS NOT NULL",
+                               rowkey_expression.c_str(), table_sql.c_str(),
+                               predicate.c_str(), column_sql.c_str()))) {
+      ret = OB_ERR_UNEXPECTED;
+    }
   } else {
-    // A row is failed when it holds no result and no task is pending for it,
-    // and pending when a task is pending for it.
+    // A row is failed when no task is pending for it, and pending when a task
+    // is pending for it.  The rest of the condition of the retry still applies,
+    // so it is kept in front of the state test.
     const char *exists = ("failed" == state) ? "NOT EXISTS" : "EXISTS";
     if (OB_FAIL(sql.assign_fmt(
-            "SELECT %s FROM %s WHERE %s IS NULL AND %s ("
+            "SELECT %s FROM %s WHERE %s AND %s IS NULL AND %s ("
             "SELECT 1 FROM oceanbase.%s tk WHERE tk.table_id = %lu "
             "AND tk.column_id = %lu AND tk.rowkey_predicate = %s)",
-            rowkey_expression.c_str(), table_sql.c_str(), column_sql.c_str(),
-            exists, OB_ALL_AI_COLUMN_TASK_TNAME,
+            rowkey_expression.c_str(), table_sql.c_str(), predicate.c_str(),
+            column_sql.c_str(), exists, OB_ALL_AI_COLUMN_TASK_TNAME,
             static_cast<unsigned long>(table_id),
             static_cast<unsigned long>(column_id), rowkey_expression.c_str()))) {
       ret = OB_ERR_UNEXPECTED;
@@ -490,11 +499,14 @@ int ai_retry_select_rows(const std::string &table_sql,
   }
   if (OB_SUCC(ret)) {
     if (OB_FAIL(proxy.init(false))) {
+      LOG_WARN("the ai column retry cannot open its connection", K(ret));
     } else {
       ObMySQLProxy::MySQLResult result_holder;
       if (OB_FAIL(proxy.read(result_holder, sql.ptr()))) {
+        LOG_WARN("the ai column retry cannot read the rows", K(ret));
       } else if (OB_ISNULL(result_holder.get_result())) {
         ret = OB_ERR_UNEXPECTED;
+        LOG_WARN("the ai column retry read no result", K(ret));
       } else {
         sqlclient::ObMySQLResult *result = result_holder.get_result();
         int next_ret = OB_SUCCESS;
@@ -549,8 +561,10 @@ int ai_retry_invalidate_and_enqueue(const ObTableSchema &table_schema,
     database_name.assign(database.ptr(), database.length());
     table_name.assign(table.ptr(), table.length());
     if (OB_FAIL(ai_retry_build_rowkey_expression(table_schema, rowkey_expression))) {
+      LOG_WARN("the rowkey expression of an ai column retry failed", K(ret));
     } else if (OB_FAIL(ai_retry_rewrite_predicate(predicate, column_sql, state,
                                                   rewritten_predicate))) {
+      LOG_WARN("the predicate of an ai column retry failed", K(ret));
     } else {
       const std::string table_sql =
           ai_retry_quote_identifier(database_name) + "."
