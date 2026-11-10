@@ -629,13 +629,16 @@ class LineProtocol:
     """Mysqltest-style text protocol over a byte stream."""
 
     def __init__(self, in_stream, out_stream, runner, echo=None,
-                 set_mode=None):
+                 set_mode=None, close_hook=None):
         self.in_stream = in_stream
         self.out_stream = out_stream
         self.runner = runner
         # Called with 'exact' or 'ann' when the driver sends a mode
         # directive.
         self.set_mode = set_mode
+        # Called before exiting on the --restart directive: it rolls back an
+        # open transaction and flushes the storage layer.
+        self.close_hook = close_hook
         if echo is None:
             # Do NOT echo by default: the published `.result` files are JSON
             # assertion objects, so the driver parses our stdout into
@@ -730,6 +733,23 @@ class LineProtocol:
         if not sql:
             return
         stripped = sql.strip()
+        if stripped.startswith("--restart"):
+            # The published pack defines this directive as "正常关闭并等待退出，
+            # 再用相同数据目录启动；关闭须回滚未提交事务".  If the driver
+            # sends it to us, the graceful behaviour is to roll back any open
+            # transaction, flush and exit; the driver then starts a new
+            # process against the same data directory.  When the driver
+            # restarts the process itself instead, a clean exit is what its
+            # wait-for-exit expects anyway.
+            try:
+                self.close_hook and self.close_hook()
+            except Exception:                      # pragma: no cover
+                pass
+            try:
+                self.out_stream.flush()
+            except Exception:                      # pragma: no cover
+                pass
+            os._exit(0)
         if stripped.startswith("--mode"):
             # Driver directives.  The published case pack uses two of them
             # and they are not SQL:

@@ -194,6 +194,13 @@ def main(argv=None):
         """Switch the search mode of the running session (driver directive)."""
         session.executor.session_mode = mode
 
+    def close_hook():
+        """The --restart directive: roll back and flush before exiting."""
+        try:
+            storage.close()
+        except Exception:                      # pragma: no cover
+            pass
+
     requested = (os.environ.get("MVD_PROTOCOL") or "auto").strip().lower()
 
     try:
@@ -203,13 +210,14 @@ def main(argv=None):
                 proto.JsonProtocol(in_stream, out_stream, runner).serve()
             else:
                 proto.LineProtocol(
-                    in_stream, out_stream, runner, set_mode=set_mode
+                    in_stream, out_stream, runner, set_mode=set_mode,
+                    close_hook=close_hook,
                 ).serve()
         elif requested == "mysql":
             proto.emit_ready()
             proto.MySQLProtocol(in_stream, out_stream, runner).serve()
         else:
-            _serve_auto(in_stream, out_stream, runner, set_mode)
+            _serve_auto(in_stream, out_stream, runner, set_mode, close_hook)
     finally:
         try:
             storage.close()
@@ -218,7 +226,8 @@ def main(argv=None):
     return 0
 
 
-def _serve_auto(in_stream, out_stream, runner, set_mode=None):
+def _serve_auto(in_stream, out_stream, runner, set_mode=None,
+                close_hook=None):
     """Detect the protocol from the first bytes on stdin."""
     # Peek without consuming so we can decide.
     first = in_stream.peek(8) if hasattr(in_stream, "peek") else b""
@@ -241,7 +250,8 @@ def _serve_auto(in_stream, out_stream, runner, set_mode=None):
 
     proto.emit_ready()
     proto.LineProtocol(
-        in_stream, out_stream, runner, set_mode=set_mode
+        in_stream, out_stream, runner, set_mode=set_mode,
+        close_hook=close_hook,
     ).serve()
 
 
