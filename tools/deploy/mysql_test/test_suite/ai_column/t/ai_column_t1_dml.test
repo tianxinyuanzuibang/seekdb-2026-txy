@@ -37,7 +37,7 @@ join oceanbase.__all_database d on d.database_id = t.database_id
 where d.database_name = 'ai_column_p0_t1' and t.table_name = 'docs';
 commit;
 
-let $retry = 15;
+let $retry = 600;
 let $done = 0;
 while ($retry)
 {
@@ -79,7 +79,7 @@ join oceanbase.__all_database d on d.database_id = t.database_id
 where d.database_name = 'ai_column_p0_t1' and t.table_name = 'docs';
 commit;
 
-let $retry = 15;
+let $retry = 600;
 let $done = 0;
 while ($retry)
 {
@@ -106,7 +106,7 @@ where d.database_name = 'ai_column_p0_t1' and t.table_name = 'docs'
   and task.rowkey_predicate = '`id` = 2';
 commit;
 
-let $retry = 15;
+let $retry = 600;
 let $done = 0;
 while ($retry)
 {

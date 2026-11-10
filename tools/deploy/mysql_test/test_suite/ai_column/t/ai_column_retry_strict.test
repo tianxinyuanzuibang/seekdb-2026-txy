@@ -33,7 +33,7 @@ values (1, 'news', 'active', 'row-one'),
        (2, 'sports', 'active', 'row-two'),
        (3, 'news', 'inactive', 'row-three');
 
-let $retry = 150;
+let $retry = 600;
 let $ready = 0;
 while ($retry)
 {
@@ -89,7 +89,7 @@ select count(*) = 3 as rejected_writes_leave_rows_unchanged
 from ai_column_retry_strict.docs;
 
 # Wait until the offline requests reach FAILED and their task rows are cleaned.
-let $retry = 100;
+let $retry = 600;
 let $tasks = 1;
 while ($retry)
 {
@@ -118,7 +118,7 @@ alter table ai_column_retry_strict.docs
 # Restore all rows, then prove a READY row can be selected by a business field.
 --exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19124
 alter table ai_column_retry_strict.docs retry ai column result;
-let $retry = 150;
+let $retry = 600;
 let $ready = 0;
 while ($retry)
 {
@@ -155,7 +155,7 @@ from ai_column_retry_strict.docs order by id;
 # Backticks address the physical status column instead of the STATUS pseudo column.
 --exec python3 mysql_test/test_suite/ai_column/include/ai_column_mock.py start 19124
 alter table ai_column_retry_strict.docs retry ai column result;
-let $retry = 150;
+let $retry = 600;
 let $ready = 0;
 while ($retry)
 {

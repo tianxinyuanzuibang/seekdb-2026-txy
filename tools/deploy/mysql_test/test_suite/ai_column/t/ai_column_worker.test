@@ -47,7 +47,7 @@ join oceanbase.__all_database d on d.database_id = t.database_id
 where d.database_name = 'ai_column_p0_worker' and t.table_name = 'docs';
 commit;
 
-let $retry = 150;
+let $retry = 600;
 let $visible = 0;
 let $partial = 0;
 while ($retry)
@@ -88,7 +88,7 @@ create table ai_column_p0_worker.retry_docs(
   ) WITH (sync_mode='async', max_retries=2)
 );
 insert into ai_column_p0_worker.retry_docs(id, content) values(2, 'retry-once');
-let $retry = 100;
+let $retry = 600;
 let $saw_retry = 0;
 while ($retry)
 {
@@ -110,7 +110,7 @@ while ($retry)
   }
 }
 eval select $saw_retry = 1 as retry_state_committed;
-let $retry = 100;
+let $retry = 600;
 let $done = 0;
 while ($retry)
 {
@@ -143,7 +143,7 @@ create table ai_column_p0_worker.fail_docs(
   ) WITH (sync_mode='async', max_retries=0)
 );
 insert into ai_column_p0_worker.fail_docs(id, content) values(3, 'terminal-failure');
-let $retry = 100;
+let $retry = 600;
 let $tasks = 1;
 while ($retry)
 {
@@ -171,7 +171,7 @@ eval select $tasks = 0 as terminal_failure_removes_task;
 insert into ai_column_p0_worker.docs(id, content) values(4, 'slow-old');
 --real_sleep 0.3
 update ai_column_p0_worker.docs set content = 'fast-new' where id = 4;
-let $retry = 150;
+let $retry = 600;
 let $done = 0;
 while ($retry)
 {

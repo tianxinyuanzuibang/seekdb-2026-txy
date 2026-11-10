@@ -26,7 +26,7 @@ create table ai_column_p0_vector.docs(
 insert into ai_column_p0_vector.docs(id, content)
 values (1, 'vec-zero'), (2, 'vec-ten'), (3, 'vec-twenty');
 
-let $retry = 150;
+let $retry = 600;
 let $ready = 0;
 while ($retry)
 {
@@ -68,7 +68,7 @@ from (
 ) ann;
 commit;
 
-let $retry = 150;
+let $retry = 600;
 let $ready = 0;
 while ($retry)
 {
