@@ -166,8 +166,9 @@ SELECT ...             → id⇥z
 | 单元测试 | 208 |
 | 崩溃恢复 | 6/6 |
 | 召回率 | exact 1.000 / ann 0.98 |
-| 写入 | 2.15s（100 批×100 行，每批提交） |
-| 查询 (exact) | 12.46 ms/query（裸 `math.dist` 地板 11.93ms） |
+| 写入 | 2.38s（100 批×100 行，每批提交） |
+| 查询 (exact) | **11.35 ms/query**（裸 `math.dist` 地板 11.93ms） |
+| 查询 (ann，无索引) | 101 ms/query → **提交必须用 exact** |
 | 峰值 RSS | 116 MiB |
 | conversation.json | 15 个证据实例、5 维度、机器校验 PASS |
 

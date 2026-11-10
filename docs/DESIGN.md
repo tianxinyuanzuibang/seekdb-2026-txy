@@ -207,6 +207,13 @@ language version as the Ubuntu 24.04 evaluation image), 10,000 rows of
 | Peak RSS | **116 MiB** |
 | Streaming path (vector cache disabled, 20,000 x 128, Top-K=10) | **0.10 s, 31.8 MiB peak**, identical to brute force |
 
+The submission uses **exact** mode.  Measured on the same host: exact 11.35
+ms/query, and ann 101 ms/query when no vector index exists - the
+approximate path can only be faster once an index is present, and the
+benchmark's query phase runs against whatever the submission configured, so
+exact is both the faster and the more predictable choice.  With an index
+present, ann measures 2.36 ms/query against exact's 6.16 ms/query.
+
 For reference, a bare `[math.dist(v, q) for v in vectors]` over the same
 10,000 vectors costs 11.93 ms on that machine, so the exact-mode query
 path is at the physical floor of a pure-Python exact scan: the remaining
