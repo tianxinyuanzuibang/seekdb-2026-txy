@@ -56,9 +56,13 @@ The statement defers the exact stdin/stdout framing to a test driver that is
 not published, so the framing is selectable with a single environment
 variable and the Dockerfile can change it in one line:
 
+These are for **local** use only; the judge speaks JSONL, which is the
+default.
+
 | `MVD_PROFILE` | framing |
 |---|---|
-| `text` (default) | plain text, one response per statement, **no** echo, blank line as the response terminator. A query answers with the column header and the rows; a DML statement answers with a single `N row(s) affected` line |
+| `jsonl` (default) | the judge's JSON Lines protocol - see "Protocol" above |
+| `text` | plain text, one response per statement, **no** echo, blank line as the response terminator. A query answers with the column header and the rows; a DML statement answers with a single `N row(s) affected` line |
 | `echo` | text that repeats the statement first, mysqltest `.result` style, no blank line |
 | `json` | one JSON object per statement: `{"columns":…,"rows":…,"affected_rows":…}` |
 | `jsonarray` | the whole stdout is **one JSON array** whose elements are the per-statement assertion objects (`{}`, `{"affected_rows":N}`, `{"error":"duplicate_key"}`, `{"columns":[…],"rows":[…]}`) — the same shape as the published `.result` files |
@@ -75,37 +79,37 @@ Set it in the Dockerfile for a submission, for example:
 ENV MVD_PROFILE=json
 ```
 
-### Protocols
+### Protocol
 
-The task package fixes the interface (SQL over stdin, results over stdout)
-but not the exact framing, so the server supports three protocols and picks
-one automatically from the first bytes it receives:
+The database speaks the **JSON Lines** protocol that the judge uses.  The
+request and the response are one JSON object per physical line:
 
-* **line** - mysqltest-style text. One statement per line; the reply is the
-  echoed statement, a tab-separated header line and tab-separated rows.
-  Errors are reported as `ERROR <code>: <message>`.
-* **mysql** - the MySQL client/server wire protocol (handshake v10,
-  `mysql_native_password`, `COM_QUERY`, text result sets, `ERR` packets), so a
-  real `mysqltest` binary can drive the database.
-* **json** - one JSON request per line: `{"sql": "...", "mode": "ann"}`,
-  answered with `{"columns": [...], "rows": [...], "row_count": n}`.
+```
+judge  -- {"id":1,"op":"execute","sql":"SELECT id FROM docs;","search_mode":"exact"} -->  database
+judge  <-- {"id":1,"ok":true,"columns":["id"],"rows":[[1]]}                              --  database
+```
 
-`auto` (the default) sniffs the stream: a MySQL packet sequence is
-recognised by its 4-byte header, otherwise the input is treated as text.
+* On start-up the program opens `/data`, recovers, then writes exactly
+  `{"type":"ready"}` and flushes - before the first request is read, and
+  again after every restart.
+* Every request gets exactly one response, echoing the request `id` with its
+  JSON type preserved.
+* `ok` is a JSON boolean.  A statement without a result set answers with
+  `{"id":N,"ok":true}`; a modification adds `affected_rows`; a query adds
+  `columns` and `rows`.
+* A failed statement answers `{"id":N,"ok":false,"error":{"code":...,
+  "message":...}}` and the process keeps running.
+* `{"id":N,"op":"shutdown"}` rolls back, flushes, answers `{"id":N,"ok":true}`
+  and exits with status 0.  Nothing is written to stdout after that.
+* stdout carries protocol messages only; logs go to stderr.
 
-### Ready signal
+The full specification is `STDIO_PROTOCOL.md`, and the organisers'
+`protocol_check/` directory holds their reference driver - both are
+included in this repository.
 
-The database announces readiness on **stderr** with several common
-spellings (`MiniVectorDB ready`, `Server ready`, `READY`, ...) so a driver
-looking for any of them finds one. stdout stays clean unless
-`MVD_READY_ON_STDOUT=1` is set.
-
-### Shutdown
-
-On EOF on stdin, or on `SIGTERM`/`SIGINT`, the database rolls back any open
-transaction, flushes everything to disk and exits with status 0.
-
----
+The legacy plain-text framing (SQL in, tab separated rows out) is still
+available for local use with `MVD_PROTOCOL=line`; the mysqltest-style
+harness in `tests/` uses it.
 
 ## 2. Example session
 

@@ -20,6 +20,7 @@ import sys
 import threading
 
 from . import protocol as proto
+from . import jsonl_protocol as jsonl
 from .errors import SQLError
 from .executor import Executor
 from .results import Result
@@ -201,10 +202,17 @@ def main(argv=None):
         except Exception:                      # pragma: no cover
             pass
 
-    requested = (os.environ.get("MVD_PROTOCOL") or "auto").strip().lower()
+    requested = (
+        os.environ.get("MVD_PROTOCOL") or "jsonl"
+    ).strip().lower()
 
     try:
-        if requested in ("line", "json"):
+        if requested == "jsonl":
+            jsonl.JSONLProtocol(
+                in_stream, out_stream, runner, set_mode=set_mode,
+                close_hook=close_hook,
+            ).serve()
+        elif requested in ("line", "json"):
             proto.emit_ready()
             if requested == "json":
                 proto.JsonProtocol(in_stream, out_stream, runner).serve()

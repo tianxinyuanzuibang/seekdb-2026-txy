@@ -20,8 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app \
-    MVD_DATA_DIR=/data \
-    MVD_PROFILE=jsonarray
+    MVD_DATA_DIR=/data
 
 # Python 3.12 is in the Ubuntu 24.04 archive.  The database only uses the
 # standard library, so no extra packages and no network access are needed at
