@@ -358,13 +358,6 @@ int create_tasks(const ObDMLBaseCtDef &dml_ctdef,
   const std::string hash_expression = predicate_hash_expression(predicate);
   const std::string escaped_predicate = escape_literal(predicate);
   const std::string escaped_request = escape_literal(request_id);
-  char eligible_ts[64];
-  int64_t pos = 0;
-  if (OB_FAIL(ObTimeUtility2::usec_format_to_str(
-          ObTimeUtility::current_time(),
-          ObString(ObTimeUtility2::STD_TS_FORMAT_WITH_USEC),
-          eligible_ts, sizeof(eligible_ts), pos))) {
-  }
   for (int64_t i = 0; OB_SUCC(ret) && i < specs.count(); ++i) {
     const ObAiColumnSpec &spec = specs.at(i);
     const uint64_t column_id = column_id_of(table_schema, spec.column_name_);
@@ -375,15 +368,15 @@ int create_tasks(const ObDMLBaseCtDef &dml_ctdef,
     } else if (OB_FAIL(insert_sql.assign_fmt(
                    "REPLACE INTO oceanbase.%s (table_id, column_id, rowkey_hash, request_id, "
                    "rowkey_predicate, state, retry_count, eligible_ts, last_error) "
-                   "VALUES (%lu, %lu, %s, '%.*s', '%.*s', %ld, 0, '%.*s', '')",
+                   "VALUES (%lu, %lu, %s, '%.*s', '%.*s', %ld, 0, "
+                   "NOW(6) - INTERVAL 1 SECOND, '')",
                    OB_ALL_AI_COLUMN_TASK_TNAME,
                    static_cast<unsigned long>(table_id),
                    static_cast<unsigned long>(column_id),
                    hash_expression.c_str(),
                    static_cast<int32_t>(escaped_request.size()), escaped_request.c_str(),
                    static_cast<int32_t>(escaped_predicate.size()), escaped_predicate.c_str(),
-                   static_cast<long>(ObAiColumnRuntime::TASK_PENDING),
-                   static_cast<int32_t>(pos), eligible_ts))) {
+                   static_cast<long>(ObAiColumnRuntime::TASK_PENDING)))) {
     } else if (OB_FAIL(execute_nested_write(dml_op, insert_sql.ptr()))) {
     }
   }

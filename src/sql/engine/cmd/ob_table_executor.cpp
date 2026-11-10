@@ -520,7 +520,10 @@ int ai_retry_select_rows(const std::string &table_sql,
           if (!list.empty()) {
             list += ",";
           }
-          list += std::string(value.ptr(), value.length());
+          // The predicate of a row is a text, so the list of the selected rows
+          // holds texts.  They have to be quoted, otherwise the database reads
+          // them as expressions.
+          ai_retry_append_sql_literal(list, std::string(value.ptr(), value.length()));
         }
         if (OB_ITER_END == next_ret) {
           row_list = list;
@@ -589,7 +592,8 @@ int ai_retry_invalidate_and_enqueue(const ObTableSchema &table_schema,
                 "rowkey_hash, rowkey_predicate, state, retry_count, eligible_ts, "
                 "last_error) "
                 "SELECT %lu, %lu, CONCAT('retry-%lu-%lu-', SUBSTR(MD5(%s), 1, 24)), "
-                "(CRC32(%s) %% 1000000007), %s, 0, 0, NOW(6), '' "
+                "(CRC32(%s) %% 1000000007), %s, 0, 0, "
+                "NOW(6) - INTERVAL 1 SECOND, '' "
                 "FROM %s WHERE %s",
                 OB_ALL_AI_COLUMN_TASK_TNAME,
                 static_cast<unsigned long>(table_id),
