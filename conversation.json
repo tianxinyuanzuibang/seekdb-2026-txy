@@ -119,7 +119,7 @@
       "id": "x2",
       "title": "单元测试",
       "command": "python3 -m unittest discover -s tests",
-      "output": "----------------------------------------------------------------------\nRan 218 tests in 5.034s\nOK",
+      "output": "----------------------------------------------------------------------\nRan 218 tests in 4.633s\nOK",
       "interpretation": "覆盖解析、存储、事务、恢复、索引、召回与材料校验。"
     },
     {
@@ -154,7 +154,7 @@
       "id": "x7",
       "title": "小规模性能基准",
       "command": "python3 tests/bench.py --rows 3000 --queries 200",
-      "output": "  write:  0.419s  (3000 rows)\n  index:  0.123s\n  query:  0.337s  (200 queries, 1.69 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 55.5 MiB",
+      "output": "  write:  0.398s  (3000 rows)\n  index:  0.118s\n  query:  0.317s  (200 queries, 1.59 ms/query)\n  rows returned per query: min=10 max=10\n  peak child RSS: 53.7 MiB",
       "interpretation": "写入/查询两阶段端到端耗时，用于回归。"
     },
     {
@@ -228,7 +228,7 @@
       "student_pointer": "/conversations/13/content",
       "student_evidence": "重新核对官方文档时又踩了一次坑并自己绕开：直接下载文档页拿到的是 JS 外壳，加 .md 后缀会被重定向到登录页，两条路都不通。我改去请求/markdown 视图，发现正文以百分号编码的 HTML 内嵌在页面里",
       "result_pointer": "/experiments/1/output",
-      "result_evidence": "----------------------------------------------------------------------\nRan 218 tests in 5.034s\nOK",
+      "result_evidence": "----------------------------------------------------------------------\nRan 218 tests in 4.633s\nOK",
       "reasoning": "不靠转述，直接解析官方目录结构（父子 uuid 与层级）判断赛程组织方式，从而确认要做的是「一次提交同时满足性能与材料两项」。",
       "conclusion": "确认只有一题 80 分（性能 40 + Agent prompt 40），同一 commit 提交。"
     },
