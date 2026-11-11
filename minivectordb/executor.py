@@ -203,12 +203,11 @@ class Executor:
                         column.vector_dim, len(raw)
                     )
                 )
-            if isinstance(raw, tuple):
-                # Tuples only ever come from an already-validated source:
-                # a vector literal just converted to float32, or a vector
-                # read back from storage.  Re-validating them would double
-                # the conversion cost of every insert.
-                return raw
+            # Every value goes through the conversion, which validates it
+            # and rounds it to float32.  There is deliberately no fast path
+            # for tuples: a quoted vector literal is parsed into a tuple of
+            # float64 values, and skipping the conversion would let an
+            # out-of-range element (1e39) through unnoticed.
             try:
                 return V.to_float32_values(raw)
             except OverflowError:

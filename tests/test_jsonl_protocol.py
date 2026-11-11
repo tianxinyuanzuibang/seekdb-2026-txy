@@ -159,6 +159,33 @@ class JSONLProtocolTest(unittest.TestCase):
         self.assertIs(messages[1]["ok"], False)
         self.assertTrue(messages[1]["error"]["code"])
 
+    def test_the_official_data_dir_variable_is_honoured(self):
+        """The organisers' driver exports VECTORDB_DATA_DIR."""
+        import shutil
+        import tempfile
+        other = tempfile.mkdtemp(prefix="mvd-alt-")
+        try:
+            env = dict(os.environ)
+            env.update({
+                "MVD_DATA_DIR": self.data_dir,
+                "VECTORDB_DATA_DIR": other,
+                "MVD_PROTOCOL": "jsonl",
+            })
+            proc = subprocess.run(
+                [sys.executable, "-u", "-m", "minivectordb"],
+                input=b'{"id":1,"op":"execute","sql":"CREATE TABLE x '
+                      b'(id BIGINT PRIMARY KEY);","search_mode":"exact"}\n'
+                      b'{"id":2,"op":"shutdown"}\n',
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                cwd=ROOT, env=env, timeout=180,
+            )
+            self.assertEqual(proc.returncode, 0)
+            # The table was created in the directory the driver named.
+            self.assertTrue(os.listdir(other))
+            self.assertEqual(os.listdir(self.data_dir), [])
+        finally:
+            shutil.rmtree(other, ignore_errors=True)
+
     def test_nothing_is_written_after_the_shutdown_response(self):
         env = dict(os.environ)
         env.update({"MVD_DATA_DIR": self.data_dir, "MVD_PROTOCOL": "jsonl"})

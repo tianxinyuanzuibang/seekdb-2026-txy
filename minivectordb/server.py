@@ -74,7 +74,23 @@ def apply_profile():
 
 
 def data_dir():
-    return os.environ.get("MVD_DATA_DIR") or DEFAULT_DATA_DIR
+    """The directory the database files live in.
+
+    Three names are honoured, in this order:
+
+    * ``VECTORDB_DATA_DIR`` - the name the organisers' own driver sets
+      (``protocol_check/_transport.py`` exports it), so a run that is
+      started with that variable writes where the driver expects,
+    * ``MVD_DATA_DIR`` - ours,
+    * ``/data`` - the default the statement prescribes.
+    """
+    # VECTORDB_DATA_DIR comes first: it is the name the judge's own driver
+    # exports, so it must win over our own default.
+    for name in ("VECTORDB_DATA_DIR", "MVD_DATA_DIR"):
+        value = os.environ.get(name)
+        if value:
+            return value
+    return DEFAULT_DATA_DIR
 
 
 def apply_arguments(argv):
