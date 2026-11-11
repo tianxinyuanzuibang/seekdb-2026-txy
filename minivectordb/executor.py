@@ -45,6 +45,9 @@ class Executor:
         self._indexes = {}
         # Cache of column name -> position, keyed by table identity.
         self._column_cache = {}
+        # The table of the SELECT currently being executed, so projection
+        # names can be rendered the way the columns were declared.
+        self._current_table = None
         # Cache of filter results: (table, columns, filter shape) ->
         # (data version, matching primary keys).
         self._filter_cache = {}
@@ -718,34 +721,40 @@ class Executor:
                 stmt.is_vector_search = True
                 self._vector_descending = descending
 
-        if stmt.is_vector_search and stmt.vector_expr is not None:
-            return self._exec_vector_select(stmt, table, mode)
+        self._current_table = table
+        try:
+            if stmt.is_vector_search and stmt.vector_expr is not None:
+                return self._exec_vector_select(stmt, table, mode)
 
-        rows = list(self.storage.scan(table))
-        if stmt.where is not None:
-            rows = [
-                row for row in rows
-                if self._truthy(self._eval(stmt.where, row, table))
+            rows = list(self.storage.scan(table))
+            if stmt.where is not None:
+                rows = [
+                    row for row in rows
+                    if self._truthy(self._eval(stmt.where, row, table))
+                ]
+
+            rows = self._order_rows(table, rows, stmt.order_by)
+
+            offset = stmt.offset or 0
+            if offset:
+                rows = rows[offset:]
+            if stmt.limit is not None:
+                rows = rows[: stmt.limit]
+
+            items = self._expand_items(stmt.items, columns)
+            if self._has_aggregate(items):
+                return self._exec_aggregate(stmt, table, rows, items, columns)
+            result_rows = []
+            for row in rows:
+                result_rows.append(
+                    [self._eval(item.expr, row, table) for item in items]
+                )
+            names = [
+                item.alias or self._item_name(item, columns) for item in items
             ]
-
-        rows = self._order_rows(table, rows, stmt.order_by)
-
-        offset = stmt.offset or 0
-        if offset:
-            rows = rows[offset:]
-        if stmt.limit is not None:
-            rows = rows[: stmt.limit]
-
-        items = self._expand_items(stmt.items, columns)
-        if self._has_aggregate(items):
-            return self._exec_aggregate(stmt, table, rows, items, columns)
-        result_rows = []
-        for row in rows:
-            result_rows.append(
-                [self._eval(item.expr, row, table) for item in items]
-            )
-        names = [item.alias or self._item_name(item, columns) for item in items]
-        return Result.ok(columns=names, rows=result_rows)
+            return Result.ok(columns=names, rows=result_rows)
+        finally:
+            self._current_table = None
 
     def _has_aggregate(self, items):
         """True when the projection contains an aggregate function."""
@@ -1347,7 +1356,16 @@ class Executor:
 
     def _item_name(self, item, columns):
         if isinstance(item.expr, ColumnRef):
-            return item.expr.name
+            # A bare column reference reports the name the column was
+            # declared with, which is what MySQL does: the spelling in the
+            # query is only a way to refer to it.  A hidden case that
+            # declares `ID` and selects `id` expects `ID` back.
+            try:
+                return columns[self._column_index(
+                    self._current_table, item.expr.name
+                )].name
+            except Exception:                  # pragma: no cover
+                return item.expr.name
         if isinstance(item.expr, FunctionCall):
             name = item.expr.name.upper()
             if name == "COUNT" and item.expr.args and self._is_star(
