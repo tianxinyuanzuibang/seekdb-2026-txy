@@ -51,6 +51,8 @@ class JSONLProtocol:
         self.set_mode = set_mode
         self.close_hook = close_hook
         self.data_dir = data_dir
+        self.diag = (os.environ.get("MVD_DIAG", "0").strip().lower()
+                     not in ("0", "false", "no", "off", ""))
 
     # -- output --------------------------------------------------------
     def _write(self, payload):
@@ -92,10 +94,30 @@ class JSONLProtocol:
             if not self._handle(request):
                 break
 
+    def _diag(self, message):
+        """One diagnostic line on stderr, when MVD_DIAG is enabled.
+
+        stderr is the diagnostics channel the specification provides; the
+        judge collects it separately from the protocol stream.  A single
+        line per request and per response makes a failing statement
+        findable in a collected log.
+        """
+        if self.diag:
+            try:
+                sys.stderr.write("[mvd] {}\n".format(message))
+                sys.stderr.flush()
+            except Exception:                  # pragma: no cover
+                pass
+
     def _handle(self, request):
         """Handle one request.  Returns False when the program must exit."""
         ident = request.get("id")
         op = (request.get("op") or "execute").lower()
+        self._diag("req id={} op={} sql={!r} mode={!r}".format(
+            ident, op,
+            (request.get("sql") or "")[:400],
+            request.get("search_mode"),
+        ))
 
         if op == "shutdown":
             self._write({"id": ident, "ok": True})
@@ -148,6 +170,10 @@ class JSONLProtocol:
             result = Result.ok()
 
         if getattr(result, "is_error", False):
+            self._diag("res id={} ok=false code={} msg={!r}".format(
+                ident, error_name(result.error_code),
+                (result.message or "")[:300],
+            ))
             self._write({
                 "id": ident,
                 "ok": False,
@@ -166,6 +192,12 @@ class JSONLProtocol:
             ]
         elif result.affected_rows is not None:
             payload["affected_rows"] = result.affected_rows
+        self._diag("res id={} ok=true columns={} affected={} rows={}".format(
+            ident,
+            payload.get("columns"),
+            payload.get("affected_rows"),
+            len(payload.get("rows", ())),
+        ))
         self._write(payload)
         return True
 
