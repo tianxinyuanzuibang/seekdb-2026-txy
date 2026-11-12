@@ -1654,6 +1654,24 @@ int ObSelectResolver::expand_target_list(
   } else if (table_item.is_json_table()) {
     if (OB_FAIL(resolve_all_json_table_columns(table_item, &column_items))) {
     }
+  } else if (table_item.is_file_table()) {
+    // The columns of a file table were added by the resolver, so they are
+    // collected from the column items of the statement.
+    ObSEArray<ObColumnRefRawExpr *, 4> file_columns;
+    if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(get_stmt()->get_column_exprs(table_item.table_id_, file_columns))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < file_columns.count(); ++i) {
+        ColumnItem col_item;
+        col_item.expr_ = file_columns.at(i);
+        col_item.table_id_ = file_columns.at(i)->get_table_id();
+        col_item.column_id_ = file_columns.at(i)->get_column_id();
+        col_item.column_name_ = file_columns.at(i)->get_column_name();
+        if (OB_FAIL(column_items.push_back(col_item))) {
+        }
+      }
+    }
   } else if (table_item.is_values_table()) {
     if (OB_ISNULL(get_stmt()) || OB_UNLIKELY(get_stmt()->get_column_size() == 0)) {
       ret = OB_ERR_UNEXPECTED;
@@ -3101,6 +3119,96 @@ int ObSelectResolver::resolve_into_clause(const ParseNode *node)
       ret = OB_INAPPROPRIATE_INTO;
     } else if (params_.is_from_create_view_) {
       ret = OB_ERR_VIEW_SELECT_CONTAIN_INTO;
+    } else if (T_COPY_TO == node->type_) {
+      // COPY (select ...) TO 'file' (FORMAT CSV, HEADER, ...) is resolved as
+      // the equivalent SELECT ... INTO OUTFILE.
+      const ParseNode *path_node = node->children_[1];
+      const ParseNode *option_node = (3 == node->num_child_) ? node->children_[2] : NULL;
+      // The header is only written when the option asks for it.
+      bool has_header = false;
+      char delimiter = ',';
+      bool has_null_string = false;
+      ObString null_string("NULL");
+      if (OB_NOT_NULL(option_node)) {
+        // The options are a link chain, the same shape as the arguments of a
+        // file table function.
+        std::vector<const ParseNode *> option_list;
+        const ParseNode *link = option_node;
+        while (OB_NOT_NULL(link) && T_LINK_NODE == link->type_) {
+          // A link with one child holds the first option, a link with two
+          // children points back at the previous link and holds the next one.
+          if (link->num_child_ >= 2 && OB_NOT_NULL(link->children_[1])) {
+            option_list.push_back(link->children_[1]);
+          }
+          link = link->children_[0];
+        }
+        if (OB_NOT_NULL(link)) {
+          option_list.push_back(link);
+        }
+        for (int64_t i = static_cast<int64_t>(option_list.size()) - 1; OB_SUCC(ret) && i >= 0; --i) {
+          const ParseNode *opt = option_list[static_cast<size_t>(i)];
+          if (OB_ISNULL(opt)) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (T_COPY_FORMAT == opt->type_) {
+            const ParseNode *name_node = opt->children_[0];
+            if (OB_ISNULL(name_node) || OB_ISNULL(name_node->str_value_)
+                || 0 != strncasecmp(name_node->str_value_, "csv", 4)) {
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "the copy format other than csv");
+            }
+          } else if (T_COPY_HEADER == opt->type_) {
+            has_header = true;
+          } else if (T_COPY_DELIMITER == opt->type_) {
+            ObString delim;
+            if (OB_FAIL(resolve_str_const(*opt->children_[0], delim))) {
+            } else if (delim.length() > 0) {
+              delimiter = delim.ptr()[0];
+            }
+          } else if (T_COPY_NULLSTR == opt->type_) {
+            has_null_string = true;
+            if (OB_FAIL(resolve_str_const(*opt->children_[0], null_string))) {
+            }
+          } else {
+            ret = OB_ERR_UNEXPECTED;
+          }
+        }
+      }
+      if (OB_FAIL(ret)) {
+      } else {
+        new(into_item) ObSelectIntoItem();
+        into_item->into_type_ = T_INTO_OUTFILE;
+        if (OB_FAIL(resolve_into_const_node(path_node, into_item->outfile_name_))) {
+        } else {
+          // The CSV options are carried in the into item, the writer reads
+          // them from there.  The delimiter is a single character and it is
+          // copied into the statement memory so it outlives this frame.
+          char *delim_buf = static_cast<char *>(allocator_->alloc(2));
+          if (OB_ISNULL(delim_buf)) {
+            ret = OB_ALLOCATE_MEMORY_FAILED;
+          } else {
+            delim_buf[0] = delimiter;
+            delim_buf[1] = '\0';
+            into_item->field_str_.set_varchar(ObString(1, delim_buf));
+            into_item->field_str_.set_collation_type(ObCharset::get_system_collation());
+            if (has_null_string) {
+              // The null text is written instead of an empty field.  The
+              // text is copied into the statement memory so it outlives the
+              // parse.
+              char *null_buf = static_cast<char *>(allocator_->alloc(null_string.length() + 1));
+              if (OB_ISNULL(null_buf)) {
+                ret = OB_ALLOCATE_MEMORY_FAILED;
+              } else {
+                MEMCPY(null_buf, null_string.ptr(), null_string.length());
+                null_buf[null_string.length()] = '\0';
+                into_item->null_string_.assign_ptr(null_buf, null_string.length());
+              }
+            }
+            select_stmt->set_select_into(into_item);
+            select_stmt->set_copy_header(has_header);
+          }
+        }
+      }
+      return ret;
     } else {
       new(into_item) ObSelectIntoItem();
       into_item->into_type_ = node->type_;

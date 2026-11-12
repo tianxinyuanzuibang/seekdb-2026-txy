@@ -18,6 +18,7 @@
 #define OCEANBASE_SQL_STMT_H_
 #include "data_plane/access/ob_tablet_scan.h"
 #include "sql/resolver/expr/ob_raw_expr.h"
+#include "sql/engine/basic/ob_file_table_def.h"
 #include "lib/string/ob_string.h"
 #include "lib/utility/ob_mod_define.h"
 #include "lib/allocator/ob_allocator.h"
@@ -155,6 +156,7 @@ struct TableItem
     json_table_def_ = nullptr;
     table_type_ = MAX_TABLE_TYPE;
     values_table_def_ = NULL;
+    file_table_def_ = NULL;
     sample_info_ = nullptr;
   }
 
@@ -190,6 +192,7 @@ struct TableItem
     JSON_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
+    FILE_TABLE,
   };
 
   /**
@@ -226,6 +229,9 @@ struct TableItem
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
+  // The file table functions: read_csv / read_json / read_ndjson /
+  // read_parquet / glob.
+  bool is_file_table() const { return FILE_TABLE == type_; }
   bool is_extended_all_or_user_sys_view() const
   {
     return (is_extended_sys_view_table(ref_id_) && (table_name_.prefix_match("USER_") || table_name_.prefix_match("ALL_")));
@@ -303,6 +309,8 @@ struct TableItem
   ObJsonTableDef *json_table_def_;
   // values table
   ObValuesTableDef *values_table_def_;
+  // file table function
+  ObFileTableDef *file_table_def_;
   // sample scan infos
   SampleInfo *sample_info_;
 };

@@ -290,9 +290,9 @@ END_P SET_VAR DELIMITER
         FIELD_OPTIONALLY_ENCLOSED_BY FIELD_DELIMITER FIELD_ENCLOSED_BY FILE_EXTENSION
 
         GENERAL GEOMETRY GEOMCOLLECTION GEOMETRYCOLLECTION GET_FORMAT GLOBAL GRANTS GROUP_CONCAT GROUPING
-        GLOBAL_ALIAS
+        GLOBAL_ALIAS GLOB NULLSTR COPY_DELIMITER
 
-        HASH HEAP HELP HISTOGRAM HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
+        HASH HEAP HELP HISTOGRAM HEADER HOUR HIDDEN HYBRID HYBRID_HIST HYBRID_SEARCH
 
         IDENTIFIED IK_MODE ILOG IMMEDIATE IMPORT INCLUDING INCR INDEXES INFO
         INNODB INPLACE INSERT_METHOD INSTANT INSTANCE INVOKER IO IO_THREAD IPC ISOLATE ISOLATION ISSUER
@@ -336,9 +336,9 @@ END_P SET_VAR DELIMITER
         REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
-        RANK READ_ONLY RECOVERY REJECT ROLE
+        RANK READ_ONLY RECOVERY REJECT ROLE READ_CSV READ_JSON READ_NDJSON READ_PARQUET
 
-        SAMPLE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
+        SAMPLE SAMPLE_SIZE SAVEPOINT SCALARS SCHEMA_NAME SCN SCOPE SCORE SECOND SECURITY SEED
         SEMISTRUCT_ENCODING_TYPE SERIAL SERIALIZABLE SESSION SESSION_USER SET_TP SHARE SHARED SHUTDOWN SIGNED
         SIMPLE SINGLE SKIP_INDEX SLAVE SLOW SLOT_IDX SNAPSHOT SOME SOUNDS SOURCE
         SPFILE SPLIT SQL_AFTER_GTIDS SQL_AFTER_MTS_GAPS SQL_BEFORE_GTIDS SQL_BUFFER_RESULT SQL_CACHE SQL_NO_CACHE SQL_ID SCHEMA_ID
@@ -498,6 +498,8 @@ END_P SET_VAR DELIMITER
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> file_table_expr file_table_args file_table_arg
+%type <node> copy_to_stmt copy_csv_option copy_csv_options copy_csv_options_opt
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -647,6 +649,7 @@ stmt:
   | purge_stmt              { $$ = $1; check_question_mark($$, result); }
   | analyze_stmt            { $$ = $1; check_question_mark($$, result); }
   | load_data_stmt          { $$ = $1; check_question_mark($$, result); }
+  | copy_to_stmt            { $$ = $1; check_question_mark($$, result); }
   | optimize_stmt     { $$ = $1; check_question_mark($$, result); }
   | flush_privileges_stmt { $$ = $1; check_question_mark($$, result); }
   | dump_memory_stmt  { $$ = $1; check_question_mark($$, result); }
@@ -10792,6 +10795,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | table_subquery
 {
   $$ = $1;
@@ -16668,6 +16675,232 @@ mock_jt_on_error_on_empty:
 }
 ;
 
+/*
+  file table functions: read_csv / read_json / read_ndjson / read_parquet / glob
+  The node holds the arguments, the alias and the name of the function, so the
+  resolver knows which format the file is read in.
+*/
+file_table_expr:
+READ_CSV '(' file_table_args ')' relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_csv");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $5, func_node);
+}
+| READ_CSV '(' file_table_args ')' AS relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_csv");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $6, func_node);
+}
+| READ_CSV '(' file_table_args ')'
+{
+  ParseNode *unname_node = NULL;
+  ParseNode *func_node = NULL;
+  make_name_node(unname_node, result->malloc_pool_, "");
+  make_name_node(func_node, result->malloc_pool_, "read_csv");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, unname_node, func_node);
+}
+| READ_JSON '(' file_table_args ')' relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_json");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $5, func_node);
+}
+| READ_JSON '(' file_table_args ')' AS relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_json");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $6, func_node);
+}
+| READ_JSON '(' file_table_args ')'
+{
+  ParseNode *unname_node = NULL;
+  ParseNode *func_node = NULL;
+  make_name_node(unname_node, result->malloc_pool_, "");
+  make_name_node(func_node, result->malloc_pool_, "read_json");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, unname_node, func_node);
+}
+| READ_NDJSON '(' file_table_args ')' relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_ndjson");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $5, func_node);
+}
+| READ_NDJSON '(' file_table_args ')' AS relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_ndjson");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $6, func_node);
+}
+| READ_NDJSON '(' file_table_args ')'
+{
+  ParseNode *unname_node = NULL;
+  ParseNode *func_node = NULL;
+  make_name_node(unname_node, result->malloc_pool_, "");
+  make_name_node(func_node, result->malloc_pool_, "read_ndjson");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, unname_node, func_node);
+}
+| READ_PARQUET '(' file_table_args ')' relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_parquet");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $5, func_node);
+}
+| READ_PARQUET '(' file_table_args ')' AS relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "read_parquet");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $6, func_node);
+}
+| READ_PARQUET '(' file_table_args ')'
+{
+  ParseNode *unname_node = NULL;
+  ParseNode *func_node = NULL;
+  make_name_node(unname_node, result->malloc_pool_, "");
+  make_name_node(func_node, result->malloc_pool_, "read_parquet");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, unname_node, func_node);
+}
+| GLOB '(' file_table_args ')' relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "glob");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $5, func_node);
+}
+| GLOB '(' file_table_args ')' AS relation_name
+{
+  ParseNode *func_node = NULL;
+  make_name_node(func_node, result->malloc_pool_, "glob");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, $6, func_node);
+}
+| GLOB '(' file_table_args ')'
+{
+  ParseNode *unname_node = NULL;
+  ParseNode *func_node = NULL;
+  make_name_node(unname_node, result->malloc_pool_, "");
+  make_name_node(func_node, result->malloc_pool_, "glob");
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $3, unname_node, func_node);
+}
+;
+
+file_table_args:
+file_table_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXPR_LIST, 1, $1);
+}
+| file_table_args ',' file_table_arg
+{
+  /* the argument list is a link chain, the push_back helper only accepts a
+     list node that already holds one element */
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_arg:
+literal
+{
+  $$ = $1;
+}
+| '-' INTNUM
+{
+  /* a negative number, the sample size of -1 means that the whole file is
+     read */
+  $2->value_ = -$2->value_;
+  $$ = $2;
+}
+| NAME_OB COMP_EQ literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $3);
+}
+| NAME_OB COMP_EQ '-' INTNUM
+{
+  $4->value_ = -$4->value_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, $1, $4);
+}
+| unreserved_keyword COMP_EQ literal
+{
+  ParseNode *name_node = NULL;
+  get_non_reserved_node(name_node, result->malloc_pool_, @1.first_column, @1.last_column);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $3);
+}
+| unreserved_keyword COMP_EQ '-' INTNUM
+{
+  ParseNode *name_node = NULL;
+  get_non_reserved_node(name_node, result->malloc_pool_, @1.first_column, @1.last_column);
+  $4->value_ = -$4->value_;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_OPTION, 2, name_node, $4);
+}
+;
+
+/*
+  COPY (select ...) TO 'file' (FORMAT CSV, HEADER, DELIMITER 'x', NULLSTR 'y')
+  is resolved as the equivalent SELECT ... INTO OUTFILE.
+*/
+copy_to_stmt:
+COPY '(' select_stmt ')' TO STRING_VALUE copy_csv_options_opt
+{
+  ParseNode *select_node = $3;
+  if (OB_UNLIKELY(NULL == select_node || T_SELECT != select_node->type_)) {
+    yyerror(NULL, result, "copy needs a select statement\n");
+    YYERROR;
+  } else if (OB_UNLIKELY(NULL != select_node->children_[PARSE_SELECT_INTO]
+                         || NULL != select_node->children_[PARSE_SELECT_INTO_EXTRA])) {
+    yyerror(NULL, result, "the select of a copy statement may not hold an into clause\n");
+    YYERROR;
+  } else {
+    ParseNode *into_node = NULL;
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_COPY_TO, 3, select_node, $6, $7);
+    select_node->children_[PARSE_SELECT_INTO] = into_node;
+    $$ = select_node;
+  }
+}
+;
+
+copy_csv_options_opt:
+/* EMPTY */
+{
+  $$ = NULL;
+}
+| '(' copy_csv_options ')'
+{
+  $$ = $2;
+}
+;
+
+copy_csv_options:
+copy_csv_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 1, $1);
+}
+| copy_csv_options ',' copy_csv_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_csv_option:
+FORMAT NAME_OB
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_FORMAT, 1, $2);
+}
+| HEADER
+{
+  malloc_terminal_node($$, result->malloc_pool_, T_COPY_HEADER);
+}
+| DELIMITER literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_DELIMITER, 1, $2);
+}
+| COPY_DELIMITER literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_DELIMITER, 1, $2);
+}
+| NULLSTR literal
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COPY_NULLSTR, 1, $2);
+}
+;
+
 jt_column_list:
 json_table_column_def 
 {
@@ -17976,6 +18209,7 @@ ACCOUNT
 |       RTREE
 |       RUN
 |       SAMPLE
+|       SAMPLE_SIZE
 |       SAVEPOINT
 |       SCALARS
 |       SCHEMA_NAME
@@ -17985,6 +18219,14 @@ ACCOUNT
 |       SECOND
 |       SECURITY
 |       SEED
+|       READ_CSV
+|       READ_JSON
+|       READ_NDJSON
+|       READ_PARQUET
+|       GLOB
+|       HEADER
+|       NULLSTR
+|       COPY_DELIMITER
 |       SEMISTRUCT_ENCODING_TYPE
 |       SEQUENCE
 |       SERIAL

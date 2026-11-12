@@ -67,6 +67,7 @@ class JoinPath;
 class SubQueryPath;
 class FunctionTablePath;
 class JsonTablePath;
+class FileTablePath;
 class TempTablePath;
 class CteTablePath;
 class ObJoinOrder;
@@ -581,6 +582,9 @@ public:
 
   int allocate_json_table_path(JsonTablePath *json_table_path,
                                    ObLogicalOperator *&out_access_path_op);
+
+  int allocate_file_table_path(FileTablePath *file_table_path,
+                               ObLogicalOperator *&out_access_path_op);
 
   //store index column ids including storing column.
   int store_index_column_ids(ObSqlSchemaGuard &schema_guard,
@@ -1553,6 +1557,7 @@ protected:
   int init_function_table_depend_info(const ObIArray<TableItem*> &table_items);
 
   int init_json_table_depend_info(const ObIArray<TableItem*> &table_items);
+  int init_file_table_depend_info(const ObIArray<TableItem*> &table_items);
   // init json_table non_const default value
   int init_json_table_column_depend_info(ObRelIds& depend_table_set, 
                                                    TableItem* json_table, 

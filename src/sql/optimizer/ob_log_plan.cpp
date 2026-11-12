@@ -285,6 +285,7 @@ int ObLogPlan::generate_join_orders()
     } else if (OB_FAIL(init_function_table_depend_info(base_table_items))) {
     } else if (OB_FAIL(init_json_table_depend_info(base_table_items))) {
     } else if (OB_FAIL(init_lateral_table_depend_info(base_table_items))) {
+    } else if (OB_FAIL(init_file_table_depend_info(base_table_items))) {
     } else if (OB_FALSE_IT(conflict_detectors_.reuse())) {
     } else if (OB_FAIL(generator.generate_conflict_detectors(get_stmt(),
                                                              from_table_items,
@@ -1062,6 +1063,29 @@ int ObLogPlan::init_json_table_depend_info(const ObIArray<TableItem*> &table_ite
     }
   }
   if (OB_SUCC(ret)) {
+  }
+  return ret;
+}
+
+int ObLogPlan::init_file_table_depend_info(const ObIArray<TableItem*> &table_items)
+{
+  int ret = OB_SUCCESS;
+  const ObDMLStmt *stmt = get_stmt();
+  if (OB_ISNULL(stmt)) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  for (int64_t i = 0; OB_SUCC(ret) && i < table_items.count(); ++i) {
+    TableItem *table = table_items.at(i);
+    if (OB_ISNULL(table)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (!table->is_file_table()) {
+      // do nothing
+    } else {
+      // A file table function always scans a local file, it does not depend
+      // on the other tables of the statement.  It is not added to the table
+      // depend infos, an empty depend set would make every join with the
+      // table look like a join with a dependent table.
+    }
   }
   return ret;
 }
@@ -3502,6 +3526,10 @@ int ObLogPlan::create_plan_tree_from_path(Path *path,
     } else if (path->is_json_table_path()) {
       JsonTablePath *json_table_path = static_cast<JsonTablePath *>(path);
       if (OB_FAIL(allocate_json_table_path(json_table_path, op))) {
+      } else { /* Do nothing */ }
+    } else if (path->is_file_table_path()) {
+      FileTablePath *file_table_path = static_cast<FileTablePath *>(path);
+      if (OB_FAIL(allocate_file_table_path(file_table_path, op))) {
       } else { /* Do nothing */ }
     } else if (path->is_temp_table_path()) {
       TempTablePath *temp_table_path = static_cast<TempTablePath *>(path);
@@ -6829,6 +6857,24 @@ int ObLogPlan::allocate_select_into_as_top(ObLogicalOperator *&old_top)
       select_into->set_buffer_size(into_item->buffer_size_);
       select_into->set_escaped_cht(into_item->escaped_cht_);
       select_into->set_cs_type(into_item->cs_type_);
+      select_into->set_copy_header(stmt->get_copy_header());
+      select_into->set_null_string(into_item->null_string_);
+      // The names of the columns are the header of a COPY statement.
+      if (OB_SUCC(ret) && stmt->get_copy_header()) {
+        const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(stmt);
+        for (int64_t i = 0; OB_SUCC(ret) && i < select_stmt->get_select_item_size(); ++i) {
+          const SelectItem &select_item = select_stmt->get_select_item(i);
+          ObString name;
+          // A column without an alias keeps the name of the column it refers
+          // to, so the header holds the name of the column.
+          const ObString &item_name = select_item.alias_name_.length() > 0
+                                      ? select_item.alias_name_
+                                      : select_item.expr_name_;
+          if (OB_FAIL(ob_write_string(allocator_, item_name, name))) {
+          } else if (OB_FAIL(select_into->get_column_names().push_back(name))) {
+          }
+        }
+      }
       select_into->set_external_properties(into_item->external_properties_);
       select_into->set_child(ObLogicalOperator::first_child, old_top);
       // compute property
@@ -11796,6 +11842,36 @@ int ObLogPlan::allocate_values_table_path(ValuesTablePath *values_table_path,
   if (OB_FAIL(do_alloc_values_table_path(values_table_path, values_op))) {
   } else {
     out_access_path_op = values_op;
+  }
+  return ret;
+}
+
+int ObLogPlan::allocate_file_table_path(FileTablePath *file_table_path,
+                                        ObLogicalOperator *&out_access_path_op)
+{
+  int ret = OB_SUCCESS;
+  ObLogFileScan *file_op = NULL;
+  const TableItem *table_item = NULL;
+  if (OB_ISNULL(file_table_path) || OB_ISNULL(get_stmt()) ||
+      OB_ISNULL(table_item = get_stmt()->get_table_item_by_id(file_table_path->table_id_))) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_ISNULL(file_op = static_cast<ObLogFileScan*>(get_log_op_factory().
+                                         allocate(*this, LOG_FILE_SCAN)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else {
+    file_op->set_table_id(file_table_path->table_id_);
+    file_op->set_table_name(table_item->get_table_name());
+    file_op->set_file_def(file_table_path->file_def_);
+    // The columns of the file become the access expressions of the scan.
+    ObSEArray<ObColumnRefRawExpr *, 4> column_exprs;
+    if (OB_FAIL(get_stmt()->get_column_exprs(file_table_path->table_id_, column_exprs))) {
+    } else if (OB_FAIL(file_op->set_column_exprs(column_exprs))) {
+    } else if (OB_FAIL(append(file_op->get_filter_exprs(), file_table_path->filter_))) {
+    } else if (OB_FAIL(file_op->compute_property(file_table_path))) {
+    } else if (OB_FAIL(file_op->pick_out_startup_filters())) {
+    } else {
+      out_access_path_op = file_op;
+    }
   }
   return ret;
 }

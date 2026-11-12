@@ -60,9 +60,11 @@ int ObSelectIntoItem::deep_copy(ObIAllocator &allocator,
   max_file_size_ = other.max_file_size_;
   escaped_cht_ = other.escaped_cht_;
   cs_type_ = other.cs_type_;
+  if (OB_FAIL(ob_write_string(allocator, other.null_string_, null_string_))) {
+  }
   buffer_size_ = other.buffer_size_;
   user_vars_.assign(other.user_vars_);
-  if (OB_FAIL(ob_write_string(allocator, other.external_properties_, external_properties_))) {
+  if (OB_SUCC(ret) && OB_FAIL(ob_write_string(allocator, other.external_properties_, external_properties_))) {
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < other.pl_vars_.count(); ++i) {
     ObRawExpr* pl_var;
@@ -206,6 +208,7 @@ int ObSelectStmt::assign(const ObSelectStmt &other)
     show_stmt_ctx_.assign(other.show_stmt_ctx_);
     select_type_ = other.select_type_;
     into_item_ = other.into_item_;
+    copy_header_ = other.copy_header_;
     children_swapped_ = other.children_swapped_;
     check_option_ = other.check_option_;
     contain_ab_param_ = other.contain_ab_param_;
@@ -374,6 +377,7 @@ ObSelectStmt::ObSelectStmt()
   view_ref_id_ = OB_INVALID_ID;
   select_type_ = AFFECT_FOUND_ROWS;
   into_item_ = NULL;
+  copy_header_ = false;
   is_match_topk_ = false;
   children_swapped_ = false;
   check_option_ = VIEW_CHECK_OPTION_NONE;
@@ -1043,6 +1047,7 @@ int ObSelectStmt::is_query_deterministic(bool &is_deterministic) const
       } else if (table_item->is_basic_table() ||
                  table_item->is_values_table() ||
                  table_item->is_json_table() ||
+                 table_item->is_file_table() ||
                  table_item->is_function_table() ||
                  table_item->is_fake_cte_table()) {
         /* do nothing */

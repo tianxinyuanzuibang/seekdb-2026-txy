@@ -525,6 +525,12 @@ class ObJsonTableOp;
 REGISTER_OPERATOR(ObLogJsonTable, PHY_JSON_TABLE, ObJsonTableSpec,
                   ObJsonTableOp, NOINPUT);
 
+class ObLogFileScan;
+class ObFileScanSpec;
+class ObFileScanOp;
+REGISTER_OPERATOR(ObLogFileScan, PHY_FILE_SCAN, ObFileScanSpec,
+                  ObFileScanOp, NOINPUT);
+
 class ObLogOptimizerStatsGathering;
 class ObOptimizerStatsGatheringSpec;
 class ObOptimizerStatsGatheringOp;

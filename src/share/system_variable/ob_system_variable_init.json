@@ -2459,6 +2459,19 @@
     "background_cn": "导入导出功能未限制文件访问可能存在漏洞",
     "ref_url": ""
   },
+  "enable_file_sql": {
+    "id": 10103,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "enable the file table functions, such as read_csv, read_json, read_ndjson, read_parquet and glob",
+    "flags": "SESSION | NEED_SERIALIZE | INFLUENCE_PLAN",
+    "publish_version": "226",
+    "info_cn": "控制文件即数据库功能是否开启",
+    "background_cn": "文件查询默认关闭，开启后才能通过read_csv等函数读取本地文件",
+    "ref_url": ""
+  },
   "_enable_parallel_query": {
     "id": 10104,
     "name": "_enable_parallel_query",

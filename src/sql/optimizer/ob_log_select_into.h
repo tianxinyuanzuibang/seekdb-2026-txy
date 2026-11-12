@@ -43,6 +43,9 @@ public:
         buffer_size_(DEFAULT_BUFFER_SIZE),
         escaped_cht_(),
         cs_type_(CS_TYPE_INVALID),
+        copy_header_(false),
+        null_string_(),
+        column_names_(),
         is_overwrite_(false),
         external_properties_()
   {
@@ -99,6 +102,26 @@ public:
   inline void set_cs_type(common::ObCollationType &cs_type)
   {
     cs_type_ = cs_type;
+  }
+  inline void set_copy_header(bool copy_header)
+  {
+    copy_header_ = copy_header;
+  }
+  inline bool get_copy_header() const
+  {
+    return copy_header_;
+  }
+  inline void set_null_string(const common::ObString &null_string)
+  {
+    null_string_ = null_string;
+  }
+  inline common::ObString get_null_string() const
+  {
+    return null_string_;
+  }
+  inline common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> &get_column_names()
+  {
+    return column_names_;
   }
   inline void set_is_overwrite(bool is_overwrite)
   {
@@ -186,6 +209,9 @@ private:
   int64_t buffer_size_;
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
+  bool copy_header_;
+  common::ObString null_string_;
+  common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> column_names_;
   bool is_overwrite_;
   common::ObString external_properties_;
 };

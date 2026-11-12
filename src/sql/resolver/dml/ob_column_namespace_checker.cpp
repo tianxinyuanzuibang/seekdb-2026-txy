@@ -325,6 +325,23 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
                                                                 col_name,
                                                                 is_exist))) {
     }
+  } else if (table_item.is_file_table()) {
+    // The columns of a file table were added by the resolver, so a match is
+    // looked up in the column items of the statement.
+    ObSEArray<ObColumnRefRawExpr *, 4> file_columns;
+    if (OB_ISNULL(dml_stmt_)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (OB_FAIL(dml_stmt_->get_column_exprs(table_item.table_id_, file_columns))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && !is_exist && i < file_columns.count(); ++i) {
+        if (OB_ISNULL(file_columns.at(i))) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          is_exist = ObCharset::case_insensitive_equal(
+              file_columns.at(i)->get_column_name(), col_name);
+        }
+      }
+    }
   } else if (table_item.is_values_table()) {
     ObSEArray<ObColumnRefRawExpr *, 4> values_desc;
     if (OB_ISNULL(dml_stmt_)) {
@@ -383,6 +400,7 @@ int ObColumnNamespaceChecker::find_column_in_single_table(const TableItem &table
   if (OB_SUCC(ret) && is_match) {
     if (OB_FAIL(check_column_exists(table_item, q_name.col_name_, is_match))) {
     }
+  } else if (table_item.is_file_table()) {
   }
   if (OB_SUCC(ret) && !is_match) {
     ret = OB_ERR_BAD_FIELD_ERROR;

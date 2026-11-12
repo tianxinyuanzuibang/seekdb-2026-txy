@@ -1,0 +1,74 @@
+# owner: database-competition
+# owner group: SQL
+# description: JOIN, security and error paths of the file table functions.
+# tags: sql,executor,file_sql
+
+--source mysql_test/test_suite/file_sql/include/copy_file_sql_data.inc
+
+--disable_query_log
+let $FILE_SQL_DATA_DIR = $OBSERVER_DIR/data_for_mysqltest_file_sql;
+
+set session enable_file_sql = ON;
+
+--echo # the path must stay inside secure_file_priv
+--disable_result_log
+--error 9731
+eval select count(*) from read_csv('/etc/passwd');
+--enable_result_log
+
+--echo # a missing file reports a file error instead of crashing
+--disable_result_log
+--error 4001
+eval select count(*) from read_csv('$FILE_SQL_DATA_DIR/no_such_file.csv');
+--enable_result_log
+
+--echo # a file that is not a parquet file is rejected
+--disable_result_log
+--error 1105
+eval select count(*) from read_parquet('$FILE_SQL_DATA_DIR/invalid.txt');
+--enable_result_log
+
+--echo # a document that is not a flat jsonl object is rejected
+--disable_result_log
+--error 1105
+eval select count(*) from read_json('$FILE_SQL_DATA_DIR/invalid.txt');
+--enable_result_log
+
+--echo # INNER JOIN between two csv files
+eval select a.id AS id, a.name AS name_a, b.name AS name_b
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') a
+       join read_csv('$FILE_SQL_DATA_DIR/basic.csv') b
+         on a.id = b.id
+      order by a.id;
+
+--echo # a cross format JOIN between csv and jsonl
+eval select c.id AS id, j.name AS name
+       from read_csv('$FILE_SQL_DATA_DIR/basic.csv') c
+       join read_json('$FILE_SQL_DATA_DIR/basic.jsonl', format = 'newline_delimited') j
+         on c.id = j.id
+      order by c.id;
+
+--echo # the plan of a file query runs on the seekdb operators
+--disable_result_log
+eval explain select count(*) from read_csv('$FILE_SQL_DATA_DIR/basic.csv');
+--enable_result_log
+
+--echo # a glob result can be filtered
+eval select substring_index(file, '/', -1) AS file
+       from glob('$FILE_SQL_DATA_DIR/*.csv')
+      order by file;
+
+--echo # COPY exports and reads back with the csv options
+eval copy (select id, name
+             from read_csv('$FILE_SQL_DATA_DIR/basic.csv')
+            order by id)
+       to '$FILE_SQL_DATA_DIR/export_join.csv'
+       (format csv, header, nullstr 'NULL');
+eval select id, name
+       from read_csv('$FILE_SQL_DATA_DIR/export_join.csv')
+      order by id;
+
+set session enable_file_sql = OFF;
+--enable_query_log
+
+--source mysql_test/test_suite/file_sql/include/remove_file_sql_data.inc

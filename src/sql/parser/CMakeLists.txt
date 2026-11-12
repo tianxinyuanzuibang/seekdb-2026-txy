@@ -44,8 +44,6 @@ set(ob_extra_sql_parser_object_list
   ob_parser.cpp
   ob_parser.h
   ob_parser_utils.h
-  ob_file_sql_rewriter.cpp
-  ob_file_sql_rewriter.h
   ob_ai_column_rewriter.cpp
   ob_ai_column_rewriter.h
 )

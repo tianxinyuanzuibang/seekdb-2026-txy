@@ -17,6 +17,7 @@
 #ifndef OCEANBASE_SQL_RESOLVER_DML_OB_DML_RESOLVER_H_
 #define OCEANBASE_SQL_RESOLVER_DML_OB_DML_RESOLVER_H_
 #include "sql/resolver/dml/ob_dml_stmt.h"
+#include "sql/engine/basic/ob_file_table_def.h"
 #include "sql/resolver/dml/ob_column_namespace_checker.h"
 #include "sql/resolver/ob_stmt_resolver.h"
 #include "sql/resolver/expr/ob_raw_expr_resolver_impl.h"
@@ -208,6 +209,12 @@ public:
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
+  // The file table functions: read_csv / read_json / read_ndjson /
+  // read_parquet / glob.
+  int resolve_file_table_item(const ParseNode &table_node, TableItem *&table_item);
+  // Builds the schema of a file table function: the readers are opened once
+  // and the resulting column metadata is kept in the table item.
+  int infer_file_table_schema(ObFileTableDef &file_def);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);
   int resolve_hybrid_search_item(const ParseNode &parse_tree, TableItem *&table_item);

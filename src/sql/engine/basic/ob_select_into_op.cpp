@@ -37,8 +37,8 @@ namespace sql
 OB_SERIALIZE_MEMBER(ObSelectIntoOpInput, task_id_, sqc_id_);
 OB_SERIALIZE_MEMBER((ObSelectIntoSpec, ObOpSpec), into_type_, user_vars_, outfile_name_,
     field_str_, line_str_, closed_cht_, is_optional_, select_exprs_, is_single_, max_file_size_,
-    escaped_cht_, cs_type_, parallel_, buffer_size_, is_overwrite_,
-    external_properties_);
+    escaped_cht_, cs_type_, copy_header_, null_string_, column_names_, parallel_, buffer_size_,
+    is_overwrite_, external_properties_);
 
 
 int ObSelectIntoOp::inner_open()
@@ -943,6 +943,41 @@ int ObSelectIntoOp::print_field(const ObObj &obj, ObCsvFileWriter &data_writer)
   return ret;
 }
 
+int ObSelectIntoOp::write_copy_header(ObCsvFileWriter &csv_data_writer)
+{
+  int ret = OB_SUCCESS;
+  // A COPY statement writes a header row before the first data row.  The rows
+  // are written either one by one or in batches, so the header is written
+  // here for both of the paths.
+  if (header_written_ || T_INTO_OUTFILE != MY_SPEC.into_type_
+      || !MY_SPEC.copy_header_) {
+    return ret;
+  }
+  const ObIArray<ObExpr*> &select_exprs = MY_SPEC.select_exprs_;
+  ObObj header_obj;
+  for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
+    // The name of the column is the header of the field.
+    const common::ObString name = (i < MY_SPEC.column_names_.count())
+                                 ? MY_SPEC.column_names_.at(i)
+                                 : common::ObString();
+    if (name.length() > 0) {
+      header_obj.set_varchar(name.ptr(), name.length());
+      header_obj.set_collation_type(ObCharset::get_system_collation());
+      if (OB_FAIL(print_field(header_obj, csv_data_writer))) {
+      }
+    }
+    // print field terminator
+    if (OB_SUCC(ret) && i != select_exprs.count() - 1) {
+      OZ(write_obj_to_file(field_str_, csv_data_writer));
+    }
+  }
+  if (OB_SUCC(ret)) {
+    OZ(write_obj_to_file(line_str_, csv_data_writer));
+    header_written_ = true;
+  }
+  return ret;
+}
+
 int ObSelectIntoOp::into_outfile(ObExternalFileWriter *data_writer)
 {
   int ret = OB_SUCCESS;
@@ -952,6 +987,10 @@ int ObSelectIntoOp::into_outfile(ObExternalFileWriter *data_writer)
   ObCsvFileWriter *csv_data_writer = NULL;
   if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
     ret = OB_ERR_UNEXPECTED;
+  }
+  // The header row of a COPY statement.
+  if (OB_SUCC(ret)) {
+    OZ(write_copy_header(*csv_data_writer));
   }
   for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
     if (OB_ISNULL(select_exprs.at(i))) {
@@ -992,6 +1031,13 @@ int ObSelectIntoOp::into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFil
   ObDatum *datum = NULL;
   ObObj obj;
   ObCsvFileWriter *csv_data_writer = NULL;
+  if (OB_ISNULL(csv_data_writer = static_cast<ObCsvFileWriter *>(data_writer))) {
+    ret = OB_ERR_UNEXPECTED;
+  }
+  // The header row of a COPY statement.
+  if (OB_SUCC(ret)) {
+    OZ(write_copy_header(*csv_data_writer));
+  }
   for (int64_t i = 0; OB_SUCC(ret) && i < select_exprs.count(); ++i) {
     if (OB_FAIL(select_exprs.at(i)->eval_batch(eval_ctx_, *brs.skip_, brs.size_))) {
     } else if (OB_FAIL(datum_vectors.push_back(select_exprs.at(i)->locate_expr_datumvector(eval_ctx_)))) {

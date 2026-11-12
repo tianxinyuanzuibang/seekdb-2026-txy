@@ -41,8 +41,10 @@ def main():
     libraries = {}
     build_dirs = {}
     # Preserve inherited GNU Make jobserver descriptors when CMake provides them.
+    # The text mode of Popen needs Python 3.7, so the decoding is done here to
+    # keep the script working on Python 3.6.
     with subprocess.Popen(command, cwd=workspace, stdout=subprocess.PIPE,
-                          text=True, close_fds=False) as cargo:
+                          universal_newlines=True, close_fds=False) as cargo:
         for line in cargo.stdout:
             message = json.loads(line)
             if message["reason"] == "build-script-executed":

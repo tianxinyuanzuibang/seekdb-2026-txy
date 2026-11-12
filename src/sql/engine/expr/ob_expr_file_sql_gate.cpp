@@ -52,19 +52,10 @@ int ObExprFileSqlGate::eval_file_sql_gate(const ObExpr &expr, ObEvalCtx &ctx, Ob
   if (OB_ISNULL(session_info = ctx.exec_ctx_.get_my_session())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
-    const ObObj *value = session_info->get_user_variable_value(
-        ObString::make_string("__enable_file_sql"));
-    int64_t flag = 0;
-    if (nullptr != value && !value->is_null()) {
-      if (value->is_integer_type()) {
-        flag = value->get_int();
-      } else if (value->is_string_type()) {
-        const ObString text = value->get_string();
-        flag = (0 == text.case_compare("on") || 0 == text.case_compare("true") ||
-                0 == text.compare("1")) ? 1 : 0;
-      }
-    }
-    if (0 == flag) {
+    bool enabled = false;
+    if (OB_FAIL(session_info->get_enable_file_sql(enabled))) {
+      LOG_WARN("failed to read enable_file_sql", K(ret));
+    } else if (!enabled) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "file sql is not enabled in this session");
       LOG_WARN("file sql is disabled, enable_file_sql must be set to on", K(ret));

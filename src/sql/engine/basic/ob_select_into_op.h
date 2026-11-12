@@ -68,6 +68,9 @@ public:
       max_file_size_(DEFAULT_MAX_FILE_SIZE),
       escaped_cht_(),
       cs_type_(CS_TYPE_INVALID),
+      copy_header_(false),
+      null_string_(),
+      column_names_(),
       parallel_(1),
       buffer_size_(DEFAULT_BUFFER_SIZE),
       is_overwrite_(false),
@@ -87,6 +90,12 @@ public:
   int64_t max_file_size_;
   common::ObObj escaped_cht_;
   common::ObCollationType cs_type_;
+  // A COPY statement writes a header row first.
+  bool copy_header_;
+  // The text that is written for a NULL value.
+  common::ObString null_string_;
+  // The names of the columns, they are the header of a COPY statement.
+  common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> column_names_;
   int64_t parallel_;
   int64_t buffer_size_;
   bool is_overwrite_;
@@ -114,8 +123,8 @@ public:
       has_escape_(true),
       has_lob_(false),
       has_json_(false),
+      header_written_(false),
       has_coll_(false),
-      print_params_(),
       escape_printer_(),
       json_buf_(NULL),
       json_buf_len_(0),
@@ -203,6 +212,8 @@ private:
   int into_dumpfile(ObExternalFileWriter *data_writer);
   int into_outfile(ObExternalFileWriter *data_writer);
   int into_outfile_batch_csv(const ObBatchRows &brs, ObExternalFileWriter *data_writer);
+  // Writes the header row of a COPY statement, once before the first row.
+  int write_copy_header(ObCsvFileWriter &csv_data_writer);
   int extract_fisrt_wchar_from_varhcar(const ObObj &obj, int32_t &wchar);
   int print_wchar_to_buf(char *buf,
                          const int64_t buf_len,
@@ -279,6 +290,7 @@ private:
   bool has_escape_;
   bool has_lob_;
   bool has_json_;
+  bool header_written_;
   bool has_coll_;
   common::ObObjPrintParams print_params_;
   ObEscapePrinter escape_printer_;

@@ -148,6 +148,7 @@ struct ObSelectIntoItem
     field_str_ = other.field_str_;
     line_str_ = other.line_str_;
     closed_cht_ = other.closed_cht_;
+    null_string_ = other.null_string_;
     is_optional_ = other.is_optional_;
     is_single_ = other.is_single_;
     max_file_size_ = other.max_file_size_;
@@ -179,6 +180,8 @@ struct ObSelectIntoItem
   common::ObSEArray<common::ObString, 16> user_vars_; // user variables
   common::ObSEArray<sql::ObRawExpr*, 16> pl_vars_; // pl variables
   common::ObObj closed_cht_; // all fields, "123","ab"
+  // The text that is written for a NULL value, used by the COPY statement.
+  common::ObString null_string_;
   bool is_optional_; //  for string, closed character, such as "aa"
   bool is_single_;
   int64_t max_file_size_;
@@ -354,6 +357,9 @@ public:
   void set_show_table_id(uint64_t show_table_id) { show_stmt_ctx_.show_table_id_ = show_table_id; }
   void set_show_grants_user_id(uint64_t user_id) { show_stmt_ctx_.grants_user_id_ = user_id; }
   void set_select_into(ObSelectIntoItem *into_item) { into_item_ = into_item; }
+  // A COPY statement writes a header row first.
+  void set_copy_header(bool copy_header) { copy_header_ = copy_header; }
+  bool get_copy_header() const { return copy_header_; }
   uint64_t get_show_grants_user_id() { return show_stmt_ctx_.grants_user_id_; }
   int check_alias_name(ObStmtResolver &ctx, const common::ObString &alias) const;
   int check_using_column(ObStmtResolver &ctx, const common::ObString &column_name) const;
@@ -579,6 +585,7 @@ private:
   uint64_t view_ref_id_;
   SelectTypeAffectFoundRows select_type_;
   ObSelectIntoItem *into_item_; // select .. into outfile/dumpfile/var_name
+  bool copy_header_; // A COPY statement writes a header row first.
   bool is_match_topk_;
   // A set operator B -> B set operator A，children_swapped_ will be
   // set to true.

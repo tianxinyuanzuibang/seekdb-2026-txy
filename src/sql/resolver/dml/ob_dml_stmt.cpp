@@ -18,6 +18,7 @@
 #include "ob_dml_stmt.h"
 #include "sql/rewrite/ob_transform_utils.h"
 #include "sql/optimizer/ob_logical_operator.h"
+#include "sql/engine/basic/ob_file_table_def.h"
 using namespace oceanbase::sql;
 using namespace oceanbase::common;
 using namespace oceanbase::share::schema;
@@ -186,7 +187,7 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   ddl_table_id_ = other.ddl_table_id_;
   ref_query_ = other.ref_query_;
   SampleInfo *buf = NULL;
-  if (is_json_table() 
+  if (is_json_table()
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {
   } else if (OB_FAIL(expr_copier.copy(other.snapshot_query_expr_, snapshot_query_expr_))) {
   } else if (OB_FAIL(expr_copier.copy(other.function_table_expr_, function_table_expr_))) {
@@ -194,6 +195,24 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   } else if (OB_FAIL(part_names_.assign(other.part_names_))) {
   } else if (is_values_table() &&
              OB_FAIL(deep_copy_values_table_def(*other.values_table_def_, expr_copier, allocator))) {
+  } else if (is_file_table()) {
+    if (OB_ISNULL(other.file_table_def_)) {
+      // do nothing
+    } else if (OB_ISNULL(allocator)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      ObFileTableDef *file_def = static_cast<ObFileTableDef*>(
+          allocator->alloc(sizeof(ObFileTableDef)));
+      if (OB_ISNULL(file_def)) {
+        ret = OB_ALLOCATE_MEMORY_FAILED;
+      } else {
+        file_def = new (file_def) ObFileTableDef();
+        if (OB_FAIL(file_def->deep_copy(*other.file_table_def_, *allocator))) {
+        } else {
+          file_table_def_ = file_def;
+        }
+      }
+    }
   } else { /* do nothing */ }
   if (OB_SUCC(ret)) {
     if (OB_ISNULL(other.sample_info_)) {
@@ -1557,6 +1576,7 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
         ret = OB_ERR_UNEXPECTED;
       } else if (table_item->is_function_table() ||
                  table_item->is_json_table() ||
+                 table_item->is_file_table() ||
                  table_item->for_update_ ||
                  table_item->is_values_table()) {
         if (OB_FAIL(set_sharable_expr_reference(*column_item.expr_, ExplicitedRefType::REF_BY_NORMAL))) {

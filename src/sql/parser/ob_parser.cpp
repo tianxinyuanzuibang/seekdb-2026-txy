@@ -16,7 +16,6 @@
 
 #define USING_LOG_PREFIX SQL_PARSER
 #include "ob_parser.h"
-#include "ob_file_sql_rewriter.h"
 #include "ob_ai_column_rewriter.h"
 #include "lib/utility/ob_smart_call.h"
 #include "lib/oblog/ob_log.h"
@@ -843,30 +842,20 @@ int ObParser::parse_sql(const ObString &stmt,
   int ret = OB_SUCCESS;
   ObSQLParser sql_parser(*(ObIAllocator*)(parse_result.malloc_pool_), sql_mode_);
   ObString stmt_str = stmt;
-  ObString rewritten;
-  bool did_rewrite = false;
-  if (OB_ISNULL(parse_result.malloc_pool_)) {
-    ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(ObFileSQLRewriter::maybe_rewrite(*static_cast<ObIAllocator *>(parse_result.malloc_pool_),
-                                                      stmt,
-                                                      rewritten, did_rewrite))) {
-    // a failed rewrite must not break ordinary statements
-    LOG_WARN("rewrite file table function failed", K(ret));
-    ret = OB_SUCCESS;
-    did_rewrite = false;
-  }
+  // The file table functions are parsed by the grammar itself, they are not
+  // rewritten into another statement any more.
   ObString ai_rewritten;
   bool ai_did_rewrite = false;
-  if (OB_SUCC(ret) && !did_rewrite) {
-    if (OB_FAIL(ObAiColumnRewriter::maybe_rewrite(
-            *static_cast<ObIAllocator *>(parse_result.malloc_pool_),
-            stmt, ai_rewritten, ai_did_rewrite))) {
-      // The declaration is invalid, the statement must fail with the
-      // reported error instead of being parsed as an ordinary one.
-      LOG_WARN("rewrite ai column declaration failed", K(ret));
-    }
+  if (OB_ISNULL(parse_result.malloc_pool_)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(ObAiColumnRewriter::maybe_rewrite(
+          *static_cast<ObIAllocator *>(parse_result.malloc_pool_),
+          stmt, ai_rewritten, ai_did_rewrite))) {
+    // The declaration is invalid, the statement must fail with the
+    // reported error instead of being parsed as an ordinary one.
+    LOG_WARN("rewrite ai column declaration failed", K(ret));
   }
-  ObString parse_input = did_rewrite ? rewritten : (ai_did_rewrite ? ai_rewritten : stmt);
+  ObString parse_input = ai_did_rewrite ? ai_rewritten : stmt;
   if (OB_FAIL(ret)) {
   } else if (OB_FAIL(sql_parser.parse(parse_input.ptr(), parse_input.length(), parse_result))) {
     // if is multi_values_parser opt not need retry

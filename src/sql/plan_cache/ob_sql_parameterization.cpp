@@ -305,6 +305,10 @@ bool ObSqlParameterization::is_tree_not_param(const ParseNode *tree)
     ret_bool = true;
   } else if (T_CAST_ARGUMENT == tree->type_) {
     ret_bool = true;
+  } else if (T_FILE_TABLE_EXPRESSION == tree->type_) {
+    // The path of a file table decides the columns of the table, so the
+    // arguments are not parameterized.
+    ret_bool = true;
   } else if (T_FUN_SYS_UTC_TIMESTAMP == tree->type_) {
     ret_bool = true;
   } else if (T_FUN_SYS_UTC_TIME == tree->type_) {
