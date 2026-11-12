@@ -467,8 +467,25 @@ int ObFileJsonlReader::infer_schema(ObFileSchema &schema)
           ObFileColumn &column = schema.columns[static_cast<size_t>(column_index_[j].second)];
           const ObFileInferType type = infer_file_type(values[i], true);
           column.type = merge_file_infer_type(column.type, type);
+          if (OB_FILE_TYPE_NULL == type) {
+            // The column holds a null in this object.
+            column.nullable = true;
+          }
           break;
         }
+      }
+    }
+    // A key that is missing in this object is a null as well.
+    for (size_t j = 0; j < column_index_.size(); ++j) {
+      bool found = false;
+      for (size_t i = 0; i < keys.size(); ++i) {
+        if (column_index_[j].first == keys[i]) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        schema.columns[static_cast<size_t>(column_index_[j].second)].nullable = true;
       }
     }
     if (options_.max_rows > 0 && row_count >= options_.max_rows) {

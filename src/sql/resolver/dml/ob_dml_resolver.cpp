@@ -7820,23 +7820,22 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
           } else if (OB_FAIL(ob_write_string(*allocator_, path, file_def->file_path, true))) {
           }
         } else {
-          // A second positional argument is the format for read_csv.
+          // A second positional argument is the format for read_csv.  A
+          // format that the function does not know is a parse error, the
+          // statement is malformed.
           ObString value;
           if (OB_FAIL(resolve_str_const(*arg, value))) {
           } else if (OB_FILE_FORMAT_CSV == format) {
             if (0 != value.case_compare("csv")) {
-              ret = OB_NOT_SUPPORTED;
-              LOG_USER_ERROR(OB_NOT_SUPPORTED, "the format of read_csv");
+              ret = OB_ERR_PARSE_SQL;
             }
           } else if (OB_FILE_FORMAT_JSONL == format) {
             if (0 != value.case_compare("newline_delimited")
                 && 0 != value.case_compare("jsonl")) {
-              ret = OB_NOT_SUPPORTED;
-              LOG_USER_ERROR(OB_NOT_SUPPORTED, "the format of read_json");
+              ret = OB_ERR_PARSE_SQL;
             }
           } else {
-            ret = OB_NOT_SUPPORTED;
-            LOG_USER_ERROR(OB_NOT_SUPPORTED, "the format of the file table function");
+            ret = OB_ERR_PARSE_SQL;
           }
         }
       }
@@ -7956,7 +7955,8 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
               break;
             case OB_FILE_TYPE_DATETIME:
               meta.set_datetime();
-              accuracy.set_accuracy(ObAccuracy::DDL_DEFAULT_ACCURACY[ObDateTimeType]);
+              // The seconds of a file carry no fraction.
+              accuracy.set_accuracy(ObAccuracy(19, 0));
               break;
             default: {
               meta.set_varchar();

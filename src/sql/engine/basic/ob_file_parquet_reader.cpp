@@ -287,7 +287,9 @@ int snappy_uncompress(const unsigned char *in, int64_t in_len, std::string &out)
   }
   out.clear();
   out.reserve(static_cast<size_t>(expected));
-  while (OB_SUCC(ret) && pos < in_len) {
+  // The stream may be followed by padding, so the decompression stops when
+  // the expected size is reached.
+  while (OB_SUCC(ret) && pos < in_len && out.size() < expected) {
     const unsigned char tag = in[pos++];
     const int kind = tag & 0x03;
     if (0 == kind) {
@@ -548,6 +550,20 @@ int parse_page_header(CompactReader &rd, PageInfo &page)
     }
   }
   return ret;
+}
+
+// The size of one plain encoded value of the given physical type.  A boolean
+// is packed into bits, its size is returned as zero and the caller handles it.
+int plain_value_size(int ptype)
+{
+  switch (ptype) {
+    case PARQUET_INT32:
+    case PARQUET_FLOAT: return 4;
+    case PARQUET_INT64:
+    case PARQUET_DOUBLE: return 8;
+    case PARQUET_INT96: return 12;
+    default: return 0;
+  }
 }
 
 // Reads one PLAIN encoded value and returns its text form.
@@ -1112,6 +1128,9 @@ int ObFileParquetReader::decode_column_chunk(const ParquetColumnMeta &meta,
     }
     const unsigned char *data = reinterpret_cast<const unsigned char *>(payload.data());
     const int64_t data_len = static_cast<int64_t>(payload.size());
+    // The decompressed values live as long as the page, the reader below
+    // walks them after the branch that decompressed them has ended.
+    std::string plain;
     const unsigned char *values_ptr = nullptr;
     int64_t values_len = 0;
     std::vector<int64_t> defs;
@@ -1127,15 +1146,46 @@ int ObFileParquetReader::decode_column_chunk(const ParquetColumnMeta &meta,
           return ret;
         }
       }
-      values_ptr = data + page.rep_len + page.def_len;
-      values_len = data_len - page.rep_len - page.def_len;
-      if (page.v2_compressed && CODEC_SNAPPY == meta.codec) {
-        std::string plain;
-        if (OB_FAIL(snappy_uncompress(values_ptr, values_len, plain))) {
+      // The values sit at the end of the page data, the levels sit in front
+      // of them.  The size of the plain values is known from the number of
+      // the values and their width, so the values are read from the end and
+      // the levels are everything before them.  This does not depend on the
+      // length fields of the page header.
+      const int64_t value_width = plain_value_size(meta.type);
+      const int64_t plain_values_len = value_width * page.num_values;
+      if (CODEC_SNAPPY == meta.codec) {
+        // The values are compressed.  The length fields of the levels are
+        // not always written right, so the stream is tried after the levels
+        // first and at the start of the page afterwards.
+        int64_t used_len = data_len - page.rep_len - page.def_len;
+        int snappy_ret = snappy_uncompress(data + page.rep_len + page.def_len,
+                                           used_len, plain);
+        if (OB_SUCCESS != snappy_ret) {
+          plain.clear();
+          snappy_ret = snappy_uncompress(data, data_len, plain);
+          used_len = data_len;
+        }
+        if (OB_SUCCESS != snappy_ret) {
+          ret = snappy_ret;
           return ret;
         }
         values_ptr = reinterpret_cast<const unsigned char *>(plain.data());
         values_len = static_cast<int64_t>(plain.size());
+      } else {
+        if (plain_values_len > data_len) {
+          ret = OB_INVALID_DATA;
+          return ret;
+        }
+        values_ptr = data + data_len - plain_values_len;
+        values_len = plain_values_len;
+        // The levels are in front of the values.
+        const int64_t levels_len = data_len - plain_values_len;
+        if (meta.optional && levels_len > 0) {
+          if (OB_FAIL(decode_rle_bp(data + page.rep_len, levels_len, 1,
+                                    page.num_values, defs))) {
+            return ret;
+          }
+        }
       }
     } else {
       // The data page v1 holds the whole page compressed.
@@ -1154,33 +1204,65 @@ int ObFileParquetReader::decode_column_chunk(const ParquetColumnMeta &meta,
         return ret;
       }
       int64_t pos = 0;
-      if (meta.optional) {
-        if (pos + 4 > payload_len) {
-          ret = OB_INVALID_DATA;
-          return ret;
-        }
-        const int64_t dl_len = static_cast<int64_t>(
-            static_cast<uint32_t>(payload_ptr[pos]) | (static_cast<uint32_t>(payload_ptr[pos + 1]) << 8)
-            | (static_cast<uint32_t>(payload_ptr[pos + 2]) << 16)
-            | (static_cast<uint32_t>(payload_ptr[pos + 3]) << 24));
-        pos += 4;
-        if (pos + dl_len > payload_len) {
-          ret = OB_INVALID_DATA;
-          return ret;
-        }
+      // A data page v1 holds the repetition levels and the definition
+      // levels before the values.  Each of them is written with its own
+      // length, even when the column has no repetition.
+      if (pos + 4 > payload_len) {
+        ret = OB_INVALID_DATA;
+        return ret;
+      }
+      const int64_t rep_len = static_cast<int64_t>(
+          static_cast<uint32_t>(payload_ptr[pos]) | (static_cast<uint32_t>(payload_ptr[pos + 1]) << 8)
+          | (static_cast<uint32_t>(payload_ptr[pos + 2]) << 16) | (static_cast<uint32_t>(payload_ptr[pos + 3]) << 24));
+      pos += 4;
+      if (pos + rep_len > payload_len) {
+        ret = OB_INVALID_DATA;
+        return ret;
+      }
+      pos += rep_len;
+      if (pos + 4 > payload_len) {
+        ret = OB_INVALID_DATA;
+        return ret;
+      }
+      const int64_t dl_len = static_cast<int64_t>(
+          static_cast<uint32_t>(payload_ptr[pos]) | (static_cast<uint32_t>(payload_ptr[pos + 1]) << 8)
+          | (static_cast<uint32_t>(payload_ptr[pos + 2]) << 16) | (static_cast<uint32_t>(payload_ptr[pos + 3]) << 24));
+      pos += 4;
+      if (pos + dl_len > payload_len) {
+        ret = OB_INVALID_DATA;
+        return ret;
+      }
+      if (meta.optional && dl_len > 0) {
         if (OB_FAIL(decode_rle_bp(payload_ptr + pos, dl_len, 1, page.num_values, defs))) {
           return ret;
         }
-        pos += dl_len;
       }
+      pos += dl_len;
       values_ptr = payload_ptr + pos;
       values_len = payload_len - pos;
     }
-    // Decode the values of the page.
+    // Decode the values of the page.  The values are plain, or they are
+    // rle bit packed: an integer column that holds small numbers is written
+    // with the rle encoding, the page starts with the bit width.
     if (ENCODING_PLAIN != page.encoding && ENCODING_RLE != page.encoding) {
       ret = OB_NOT_SUPPORTED;
       LOG_USER_ERROR(OB_NOT_SUPPORTED, "the parquet encoding of the file is not supported");
       return ret;
+    }
+        std::vector<int64_t> numbers;
+    bool rle_values = (ENCODING_RLE == page.encoding)
+                      && (PARQUET_INT32 == meta.type || PARQUET_INT64 == meta.type
+                          || PARQUET_BOOLEAN == meta.type);
+    if (rle_values) {
+      if (values_len < 1) {
+        ret = OB_INVALID_DATA;
+        return ret;
+      }
+      const int width = values_ptr[0];
+      if (OB_FAIL(decode_rle_bp(values_ptr + 1, values_len - 1, width,
+                                page.num_values, numbers))) {
+        return ret;
+      }
     }
     int64_t pos = 0;
     for (int64_t i = 0; i < page.num_values && OB_SUCC(ret); ++i) {
@@ -1193,16 +1275,26 @@ int ObFileParquetReader::decode_column_chunk(const ParquetColumnMeta &meta,
         continue;
       }
       std::string value;
-      int64_t used = 0;
-      if (OB_FAIL(read_plain_value(meta.type, values_ptr + pos, values_len - pos,
-                                   value, used))) {
-        return ret;
+      if (rle_values) {
+        if (i >= static_cast<int64_t>(numbers.size())) {
+          ret = OB_INVALID_DATA;
+          return ret;
+        }
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%ld", static_cast<long>(numbers[i]));
+        value = buf;
+      } else {
+        int64_t used = 0;
+        if (OB_FAIL(read_plain_value(meta.type, values_ptr + pos, values_len - pos,
+                                     value, used))) {
+          return ret;
+        }
+        if (0 == used || pos + used > values_len) {
+          ret = OB_INVALID_DATA;
+          return ret;
+        }
+        pos += used;
       }
-      if (0 == used || pos + used > values_len) {
-        ret = OB_INVALID_DATA;
-        return ret;
-      }
-      pos += used;
       values.push_back(value);
       nulls.push_back(false);
     }
