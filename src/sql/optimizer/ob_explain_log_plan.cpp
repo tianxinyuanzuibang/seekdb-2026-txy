@@ -18,6 +18,7 @@
 #include "sql/optimizer/ob_explain_log_plan.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
+#include "sql/resolver/ddl/ob_explain_stmt.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -82,13 +83,18 @@ int ObExplainLogPlan::generate_normal_raw_plan()
         //to use normal encoding instead of memcopy
         optimizer_context_.set_packed(false);
       }
-      for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
-        ObObj obj;
-        obj.set_varchar(plan_strs.at(i));
-        ObNewRow row;
-        row.cells_ = &obj;
-        row.count_ = 1;
-        if (OB_FAIL(values_op->add_row(row))) {
+      if (explain_stmt->is_desc_stmt()) {
+        if (OB_FAIL(add_desc_rows(*values_op, *explain_stmt))) {
+        }
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < plan_strs.count(); ++i) {
+          ObObj obj;
+          obj.set_varchar(plan_strs.at(i));
+          ObNewRow row;
+          row.cells_ = &obj;
+          row.count_ = 1;
+          if (OB_FAIL(values_op->add_row(row))) {
+          }
         }
       }
       if (OB_SUCC(ret)) {
@@ -106,6 +112,45 @@ int ObExplainLogPlan::generate_normal_raw_plan()
                                             false);
     }
   }
+  return ret;
+}
+
+// The rows of a DESCRIBE statement.  Every row holds the name, the type,
+// whether the column is nullable, the key, the default and the extra of one
+// column of the result.
+int ObExplainLogPlan::add_desc_rows(ObLogValues &values_op, const ObExplainStmt &explain_stmt)
+{
+  int ret = OB_SUCCESS;
+  ObIAllocator &allocator = get_allocator();
+  ObObj cells[DESC_COLUMN_COUNT];
+  const ObIArray<ObExplainColumn> &columns = explain_stmt.get_desc_columns();
+  for (int64_t i = 0; OB_SUCC(ret) && i < columns.count(); ++i) {
+    const ObExplainColumn &column = columns.at(i);
+    // The name of the column.
+    ObObj name;
+    name.set_varchar(column.name.ptr(), column.name.length());
+    name.set_collation_type(ObCharset::get_system_collation());
+    cells[0] = name;
+    // The type of the column.
+    cells[1].set_varchar(column.type_name.ptr(), column.type_name.length());
+    cells[1].set_collation_type(ObCharset::get_system_collation());
+    // Whether the column is nullable.
+    cells[2].set_varchar(column.is_nullable ? "YES" : "NO");
+    cells[2].set_collation_type(ObCharset::get_system_collation());
+    // The key, the default and the extra of the column.
+    for (int64_t j = 3; OB_SUCC(ret) && j < DESC_COLUMN_COUNT; ++j) {
+      cells[j].set_varchar("NULL");
+      cells[j].set_collation_type(ObCharset::get_system_collation());
+    }
+    if (OB_SUCC(ret)) {
+      ObNewRow row;
+      row.cells_ = cells;
+      row.count_ = DESC_COLUMN_COUNT;
+      if (OB_FAIL(values_op.add_row(row))) {
+      }
+    }
+  }
+  UNUSED(allocator);
   return ret;
 }
 

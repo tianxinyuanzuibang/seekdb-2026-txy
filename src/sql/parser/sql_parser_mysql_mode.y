@@ -52,6 +52,15 @@
   } \
   malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
                            type_node, display_node, into_table, set_statement_id, stmt);
+
+// The DESCRIBE statement of a query shows the columns of the result of the
+// query, the type of the statement tells it from an EXPLAIN.
+#define GEN_DESC_STMT(no_use, explain_stmt, stmt) \
+  (void)(no_use); \
+  ParseNode *type_node = NULL; \
+  malloc_terminal_node(type_node, result->malloc_pool_, T_DESC); \
+  malloc_non_terminal_node(explain_stmt, result->malloc_pool_, T_EXPLAIN, 5, \
+                           type_node, NULL, NULL, NULL, stmt);
 %}
 
 %destructor {destroy_tree($$);}<node>
@@ -12272,8 +12281,14 @@ explain_or_desc relation_factor opt_desc_column_option
   malloc_non_terminal_node($$, result->malloc_pool_, T_SHOW_COLUMNS, 4, $$, $2, NULL, $3);
 }
 
-| explain_or_desc explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);}
-| explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
+| explain_or_desc explainable_stmt
+{
+  if (OB_NOT_NULL($1) && 1 == $1->value_) {
+    GEN_DESC_STMT($1, $$, $2);
+  } else {
+    GEN_EXPLAN_STMT($1, $$, 0, 0, $2, NULL, NULL);
+  }
+}| explain_or_desc PRETTY explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY, $3, NULL, NULL);}
 | explain_or_desc PRETTY_COLOR explainable_stmt { GEN_EXPLAN_STMT($1, $$, 0, T_PRETTY_COLOR, $3, NULL, NULL);}
 
 | explain_or_desc BASIC explainable_stmt { GEN_EXPLAN_STMT($1, $$, T_BASIC, 0, $3, NULL, NULL);}
@@ -12313,10 +12328,21 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE {$$ = NULL;}
-| DESC  {$$ = NULL;}
-;
-
+| DESCRIBE
+{
+  ParseNode *desc_node = NULL;
+  malloc_terminal_node(desc_node, result->malloc_pool_, T_INT);
+  desc_node->value_ = 1;
+  $$ = desc_node;
+}
+| DESC
+{
+  ParseNode *desc_node = NULL;
+  malloc_terminal_node(desc_node, result->malloc_pool_, T_INT);
+  desc_node->value_ = 1;
+  $$ = desc_node;
+}
+;;
 explainable_stmt:
 select_stmt         { $$ = $1; }
 | delete_stmt         { $$ = $1; }

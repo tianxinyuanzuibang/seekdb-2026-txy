@@ -25,6 +25,22 @@ namespace oceanbase
 namespace sql
 {
 
+// The number of the columns of the result of a DESCRIBE statement.
+const int64_t DESC_COLUMN_COUNT = 6;
+// The names of the columns of the result of a DESCRIBE statement.
+extern const char *const DESC_COLUMN_NAMES[DESC_COLUMN_COUNT];
+
+// One column of the result of a DESCRIBE statement.
+struct ObExplainColumn
+{
+  ObExplainColumn()
+    : name(), type_name(), is_nullable(false)
+  {}
+  common::ObString name;
+  common::ObString type_name;
+  bool is_nullable;
+};
+
 struct ObExplainDisplayOpt
 {
   ObExplainDisplayOpt() 
@@ -49,6 +65,10 @@ public:
   const ObExplainDisplayOpt &get_display_opt() const { return display_opt_; }
   ObDMLStmt* get_explain_query_stmt() const { return explain_query_stmt_; }
   void set_explain_query_stmt(ObDMLStmt *stmt) { explain_query_stmt_ = stmt; }
+  // The columns of the result, they are the rows of a DESCRIBE statement.
+  const common::ObIArray<ObExplainColumn> &get_desc_columns() const { return desc_columns_; }
+  common::ObIArray<ObExplainColumn> &get_desc_columns() { return desc_columns_; }
+  bool is_desc_stmt() const { return EXPLAIN_DESC == format_; }
   bool is_select_explain() const;
   const common::ObString& get_into_table() const { return into_table_; }
   void set_into_table(const common::ObString& into_table) { into_table_ = into_table; }
@@ -66,6 +86,8 @@ private:
   ObDMLStmt *explain_query_stmt_;
   common::ObString into_table_;
   common::ObString statement_id_;
+  // The columns of the result of a DESCRIBE statement.
+  common::ObSEArray<ObExplainColumn, 8, common::ModulePageAllocator, true> desc_columns_;
   DISALLOW_COPY_AND_ASSIGN(ObExplainStmt);
 };
 

@@ -347,7 +347,9 @@ enum ExplainType
   EXPLAIN_PLANREGRESS,
   EXPLAIN_EXTENDED_NOADDR,
   EXPLAIN_HINT_FORMAT,
-  EXPLAIN_PLAN_TABLE
+  EXPLAIN_PLAN_TABLE,
+  // The DESCRIBE statement of a query, it shows the columns of the result.
+  EXPLAIN_DESC
 };
 
 enum DiagnosticsType

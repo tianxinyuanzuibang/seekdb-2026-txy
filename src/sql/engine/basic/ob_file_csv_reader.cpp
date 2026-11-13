@@ -351,8 +351,8 @@ int ObFileCsvReader::infer_schema(ObFileSchema &schema)
   schema.columns.clear();
   for (size_t i = 0; i < header_.size(); ++i) {
     ObFileColumn column(header_[i]);
-    // A column stays nullable until it is seen holding a value in every row.
-    column.nullable = true;
+    // A column that never holds a null is not nullable.
+    column.nullable = false;
     schema.columns.push_back(column);
   }
   // The inference looks at the whole file so the result does not depend on

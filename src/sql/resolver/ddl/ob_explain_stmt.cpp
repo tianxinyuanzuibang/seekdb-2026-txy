@@ -23,6 +23,10 @@ namespace oceanbase
 {
 namespace sql
 {
+const char *const DESC_COLUMN_NAMES[DESC_COLUMN_COUNT] = {
+  "column_name", "column_type", "null", "key", "default", "extra"
+};
+
 ObExplainStmt::ObExplainStmt() : ObDMLStmt(stmt::T_EXPLAIN),
                                  format_(EXPLAIN_UNINITIALIZED),
                                  explain_query_stmt_(NULL)

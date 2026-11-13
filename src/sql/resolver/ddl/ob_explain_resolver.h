@@ -33,6 +33,10 @@ namespace sql
     virtual ~ObExplainResolver() {}
     virtual int resolve(const ParseNode &parse_tree);
     ObExplainStmt *get_explain_stmt();
+    // Reads the columns of the result of a DESCRIBE statement.
+    int fill_desc_columns(ObExplainStmt &explain_stmt);
+    // Copies the text of a column into the memory of the statement.
+    int copy_desc_text(const std::string &src, common::ObString &dst);
     int resolve_columns(ObRawExpr *&expr, common::ObArray<ObQualifiedName> &columns)
     {
       UNUSED(expr);

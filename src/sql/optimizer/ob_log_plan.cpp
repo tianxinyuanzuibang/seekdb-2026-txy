@@ -10389,21 +10389,33 @@ int ObLogPlan::allocate_output_expr_for_values_op(ObLogicalOperator &values_op)
   } else {
     // Static typing engine need expr to output rows. We generate a const output expr
     // for values_op operator.
-    ObConstRawExpr *output = NULL;
-    if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
-    } else {
-      ObObj v;
-      v.set_varchar(" ");
-      v.set_collation_type(ObCharset::get_system_collation());
-      output->set_value(v);
-      if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
-      } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+    // A DESCRIBE statement shows the name, the type, whether the column is
+    // nullable, the key, the default and the extra of every column, so its
+    // result has six columns.
+    int64_t column_count = 1;
+    if (OB_NOT_NULL(get_stmt()) && get_stmt()->is_explain_stmt()) {
+      const ObExplainStmt *explain_stmt = static_cast<const ObExplainStmt *>(get_stmt());
+      if (explain_stmt->is_desc_stmt()) {
+        column_count = DESC_COLUMN_COUNT;
+      }
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < column_count; ++i) {
+      ObConstRawExpr *output = NULL;
+      if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
       } else {
-        values_op.set_branch_id(0);
-        values_op.set_id(0);
-        values_op.set_op_id(0);
-        if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
-        } else { /*do nothing*/ }
+        ObObj v;
+        v.set_varchar(" ");
+        v.set_collation_type(ObCharset::get_system_collation());
+        output->set_value(v);
+        if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
+        } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+        } else {
+          values_op.set_branch_id(0);
+          values_op.set_id(0);
+          values_op.set_op_id(0);
+          if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
+          } else { /* do nothing */ }
+        }
       }
     }
   }

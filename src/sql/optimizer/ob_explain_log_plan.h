@@ -33,6 +33,8 @@ namespace sql
     virtual int generate_normal_raw_plan() override;
   private:
     int check_explain_generate_plan_with_outline(ObLogPlan *real_plan);
+    // The rows of a DESCRIBE statement, one row per column of the result.
+    int add_desc_rows(ObLogValues &values_op, const ObExplainStmt &explain_stmt);
     DISALLOW_COPY_AND_ASSIGN(ObExplainLogPlan);
   };
 }
