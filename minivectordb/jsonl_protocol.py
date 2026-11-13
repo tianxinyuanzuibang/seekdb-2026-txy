@@ -113,10 +113,13 @@ class JSONLProtocol:
         """Handle one request.  Returns False when the program must exit."""
         ident = request.get("id")
         op = (request.get("op") or "execute").lower()
-        self._diag("req id={} op={} sql={!r} mode={!r}".format(
-            ident, op,
-            (request.get("sql") or "")[:400],
-            request.get("search_mode"),
+        sql = request.get("sql") or ""
+        # A batch INSERT can be megabytes long; logging it in full would
+        # produce hundreds of megabytes of diagnostics over a benchmark run,
+        # which is itself a resource problem.  Log a short prefix and the
+        # length instead.
+        self._diag("req id={} op={} sql_len={} sql={!r} mode={!r}".format(
+            ident, op, len(sql), sql[:120], request.get("search_mode"),
         ))
 
         if op == "shutdown":
